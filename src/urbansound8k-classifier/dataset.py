@@ -25,7 +25,9 @@ class UrbanSoundDataset(Dataset):
         augment: bool = False,
         num_augmentations: int = 0,  # Number of augmented copies to generate (0 means no augmentation)
         split_ratio = 0.8,
-        cache_size: int = 2048  # Number of samples to cache in memory
+        cache_size: int = 1024,  # Reduced default cache size to save memory
+        prefetch_factor: int = 2,  # Controls how many samples to prefetch per worker
+        precision: torch.dtype = torch.float32  # Allow specifying precision (float32/float16)
     ):
         """
         Initialize the UrbanSound8K dataset.
@@ -40,6 +42,8 @@ class UrbanSoundDataset(Dataset):
             num_augmentations: Number of augmented copies to generate per sample (0 means no augmentation)
             split_ratio: Ratio for train/test split if not using folds
             cache_size: Maximum number of samples to cache in memory
+            prefetch_factor: Controls how many samples to prefetch per worker
+            precision: Tensor precision (torch.float32 or torch.float16)
         """
         self.sample_rate = sample_rate
         self.target_length = target_length
@@ -49,6 +53,8 @@ class UrbanSoundDataset(Dataset):
         self._cache = {}  # Initialize cache dictionary
         self._cache_size = cache_size
         self._cache_keys = []  # LRU tracking
+        self.prefetch_factor = prefetch_factor
+        self.precision = precision
         
         # Load dataset from Hugging Face
         self.dataset = load_dataset("danavery/urbansound8K", split="train")
@@ -114,7 +120,7 @@ class UrbanSoundDataset(Dataset):
         
         return original_idx, aug_id
     
-    @functools.lru_cache(maxsize=128)  # Cache the last 256 items returned
+    @functools.lru_cache(maxsize=128)  # Cache the last 128 items returned
     def __getitem__(self, idx):
         # Map to original index and augmentation ID
         original_idx, aug_id = self._get_original_index_and_aug_id(idx)
@@ -129,7 +135,7 @@ class UrbanSoundDataset(Dataset):
         
         # Load audio and convert to tensor
         audio_data = item["audio"]["array"]
-        waveform = torch.tensor(audio_data).float()
+        waveform = torch.tensor(audio_data, dtype=self.precision)  # Use specified precision
         
         # Handle stereo to mono conversion if needed
         if len(waveform.shape) > 1 and waveform.shape[0] > 1:
@@ -165,16 +171,22 @@ class UrbanSoundDataset(Dataset):
         # Get label
         label = self.class_to_idx[item["classID"]]
         
+        # Create a minimal result dictionary to save memory
         result = {
             "waveform": waveform,
-            "sample_rate": self.sample_rate,
             "label": label,
-            "class_name": item["class"],
-            "is_augmented": aug_id > 0,  # Flag to indicate if this is an augmented sample
-            "original_index": original_idx  # Store the original index for reference
         }
         
-        # Cache the result if cache isn't full
+        # Only add these fields if not in training/eval loop (for analysis/debugging)
+        if not hasattr(torch.utils.data, '_DataLoader__initialized'):
+            result.update({
+                "sample_rate": self.sample_rate,
+                "class_name": item["class"],
+                "is_augmented": aug_id > 0,
+                "original_index": original_idx
+            })
+        
+        # Cache management with memory limits
         if len(self._cache) < self._cache_size:
             self._cache[cache_key] = result
             self._cache_keys.append(cache_key)
@@ -207,6 +219,11 @@ class UrbanSoundDataset(Dataset):
         waveform = torch.clamp(waveform, -1.0, 1.0)
         
         return waveform
+
+    def clear_cache(self):
+        """Clear the sample cache to free memory"""
+        self._cache = {}
+        self._cache_keys = []
 
 
 def get_datasets(
@@ -291,47 +308,3 @@ def get_datasets(
         )
     
     return train_dataset, test_dataset
-
-
-if __name__ == "__main__":
-    # Example usage with dataset
-    print("=== UrbanSound8K Dataset Example ===")
-    
-    # Create dataset with original + augmented samples (3 augmentations per original)
-    train_dataset, test_dataset = get_datasets(
-        sample_rate=16000,
-        target_length=16000 * 4,  # 4 seconds of audio at 16kHz
-        num_augmentations=3  # Each original sample + 3 augmented versions
-    )
-    
-    # Calculate how many are original vs augmented
-    original_count = len(train_dataset.dataset)
-    total_count = len(train_dataset)
-    augmented_count = total_count - original_count
-    
-    print(f"Train dataset size: {len(train_dataset)} (Original: {original_count}, Augmented: {augmented_count})")
-    print(f"Test dataset size: {len(test_dataset)}")
-    
-    # Get original and augmented samples
-    original_sample = train_dataset[0]  # First sample should be original
-    augmented_sample = train_dataset[1]  # Second sample should be augmented version of first
-    
-    print(f"Original sample: index={original_sample['original_index']}, augmented={original_sample['is_augmented']}")
-    print(f"Augmented sample: index={augmented_sample['original_index']}, augmented={augmented_sample['is_augmented']}")
-    
-    # Test with data loader
-    from torch.utils.data import DataLoader
-    
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=8,
-        shuffle=True,
-        num_workers=2
-    )
-    
-    for batch in train_loader:
-        print(f"Batch waveform shape: {batch['waveform'].shape}")
-        print(f"Batch labels: {batch['label']}")
-        print(f"Batch is_augmented flags: {batch['is_augmented']}")
-        print(f"Batch processed successfully!")
-        break

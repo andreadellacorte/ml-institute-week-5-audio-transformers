@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import math
+import torchaudio
 from typing import Optional, Tuple
 
 
@@ -52,6 +53,112 @@ class AudioFeatureExtractor(nn.Module):
             
         # Transpose to [batch_size, sequence_length, features]
         return x.transpose(1, 2)
+
+
+class SpectrogramFeatureExtractor(nn.Module):
+    """
+    Extracts features from audio by converting it to a spectrogram and processing with 2D convolutions.
+    """
+    def __init__(
+        self,
+        n_fft: int = 400,
+        hop_length: int = 160,
+        n_mels: int = 128,
+        base_filters: int = 32,
+        sample_rate: int = 16000,
+        normalize: bool = True
+    ):
+        super().__init__()
+        
+        # Spectrogram transformation parameters
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.n_mels = n_mels
+        self.sample_rate = sample_rate
+        self.normalize = normalize
+        
+        # Mel spectrogram transform
+        self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            power=2.0,
+        )
+        
+        # Amplitude to DB conversion
+        self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB()
+        
+        # 2D convolutional layers for feature extraction
+        self.conv_layers = nn.ModuleList()
+        
+        # First Conv2D layer
+        self.conv_layers.append(
+            nn.Sequential(
+                nn.Conv2d(1, base_filters, kernel_size=(3, 3), stride=(2, 2), padding=1),
+                nn.BatchNorm2d(base_filters),
+                nn.GELU(),
+                nn.Dropout2d(0.1)
+            )
+        )
+        
+        # Additional Conv2D layers with increasing filters
+        layer_filters = [base_filters, base_filters * 2, base_filters * 4]
+        for i in range(len(layer_filters) - 1):
+            self.conv_layers.append(
+                nn.Sequential(
+                    nn.Conv2d(layer_filters[i], layer_filters[i+1], kernel_size=(3, 3), stride=(2, 2), padding=1),
+                    nn.BatchNorm2d(layer_filters[i+1]),
+                    nn.GELU(),
+                    nn.Dropout2d(0.1)
+                )
+            )
+        
+        # Store output dimension for later use
+        self.output_dim = layer_filters[-1]
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Raw audio waveform [batch_size, channels, time]
+            
+        Returns:
+            Spectrogram features [batch_size, sequence_length, feature_dim]
+        """
+        batch_size = x.size(0)
+        
+        # Convert to mono if needed
+        if x.size(1) > 1:
+            x = torch.mean(x, dim=1, keepdim=True)
+        
+        # Apply Mel spectrogram transform
+        x = self.mel_spectrogram(x)
+        
+        # Convert to decibels
+        x = self.amplitude_to_db(x)
+        
+        # Add channel dimension if not present
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        
+        # Apply normalization if enabled
+        if self.normalize:
+            # Normalize each spectrogram independently
+            mean = x.mean(dim=(2, 3), keepdim=True)
+            std = x.std(dim=(2, 3), keepdim=True) + 1e-5
+            x = (x - mean) / std
+            
+        # Apply 2D convolutional layers
+        for conv in self.conv_layers:
+            x = conv(x)
+        
+        # Reshape to sequence form: [batch, channels, height, width] -> [batch, time, features]
+        # Treat the frequency dimension as features and time as sequence
+        batch_size, channels, height, width = x.shape
+        x = x.permute(0, 3, 1, 2)  # [batch, width, channels, height]
+        x = x.reshape(batch_size, width, channels * height)  # [batch, time, features]
+        
+        return x
 
 
 class PositionalEncoding(nn.Module):
@@ -223,6 +330,91 @@ class AudioTransformerEncoder(nn.Module):
         return logits
 
 
+class SpectrogramTransformerEncoder(nn.Module):
+    """
+    An encoder-only transformer that processes audio spectrograms for classification.
+    """
+    def __init__(
+        self,
+        num_classes: int = 10,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_encoder_layers: int = 6,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        n_fft: int = 400,
+        hop_length: int = 160,
+        n_mels: int = 128,
+        base_filters: int = 32,
+        sample_rate: int = 16000
+    ):
+        super().__init__()
+        
+        # Spectrogram feature extraction
+        self.feature_extractor = SpectrogramFeatureExtractor(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            base_filters=base_filters,
+            sample_rate=sample_rate
+        )
+        
+        # Project extracted features to transformer dimension
+        self.input_projection = nn.Linear(self.feature_extractor.output_dim * n_mels // 8, d_model)
+        
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(d_model, dropout=dropout)
+        
+        # Transformer encoder layers (use the same TransformerEncoderBlock as the raw audio model)
+        self.encoder_layers = nn.ModuleList([
+            TransformerEncoderBlock(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout
+            )
+            for _ in range(num_encoder_layers)
+        ])
+        
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, num_classes)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Raw audio waveform [batch_size, channels, time]
+            
+        Returns:
+            Class logits [batch_size, num_classes]
+        """
+        # Extract features using spectrogram
+        x = self.feature_extractor(x)
+        
+        # Project to transformer dimension
+        x = self.input_projection(x)
+        
+        # Add positional encoding
+        x = self.pos_encoder(x)
+        
+        # Pass through encoder layers
+        for encoder_layer in self.encoder_layers:
+            x = encoder_layer(x)
+        
+        # Global pooling (mean over sequence dimension)
+        x = torch.mean(x, dim=1)
+        
+        # Classification
+        logits = self.classifier(x)
+        
+        return logits
+
+
 class AudioClassifier:
     """
     Wrapper class for training and evaluating the AudioTransformerEncoder model.
@@ -319,6 +511,190 @@ class AudioClassifier:
             Dictionary of metrics (loss, accuracy)
         """
         device = next(self.model.parameters()).device  # Get the device the model is on
+        self.model.eval()
+        total_loss = 0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for batch in data_loader:
+                # Ensure data is on the correct device
+                waveform = batch['waveform'].to(device)
+                labels = batch['label'].to(device)
+                
+                # Forward pass
+                logits = self.model(waveform)
+                loss = self.criterion(logits, labels)
+                
+                # Update metrics
+                total_loss += loss.item() * waveform.size(0)
+                preds = torch.argmax(logits, dim=1)
+                correct += (preds == labels).sum().item()
+                total += waveform.size(0)
+        
+        return {
+            'loss': total_loss / total if total > 0 else float('inf'),
+            'accuracy': correct / total if total > 0 else 0
+        }
+    
+    def predict(self, waveform: torch.Tensor) -> dict:
+        """
+        Make a prediction for a single waveform.
+        
+        Args:
+            waveform: Audio waveform [channels, time]
+            
+        Returns:
+            Dictionary with prediction results
+        """
+        self.model.eval()
+        
+        # Add batch dimension if needed
+        if waveform.dim() == 2:
+            waveform = waveform.unsqueeze(0)
+        
+        with torch.no_grad():
+            logits = self.model(waveform)
+            probs = F.softmax(logits, dim=1)
+            pred_class = torch.argmax(probs, dim=1).item()
+            confidence = probs[0, pred_class].item()
+            
+        return {
+            'class_id': pred_class,
+            'confidence': confidence,
+            'probabilities': probs[0].cpu().numpy()
+        }
+    
+    def save(self, filepath: str) -> None:
+        """
+        Save model checkpoint.
+        
+        Args:
+            filepath: Path to save the model
+        """
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+        }, filepath)
+    
+    def load(self, filepath: str, device: str = 'cpu') -> None:
+        """
+        Load model checkpoint.
+        
+        Args:
+            filepath: Path to load the model from
+            device: Device to load the model to
+        """
+        checkpoint = torch.load(filepath, map_location=device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+
+class SpectrogramClassifier:
+    """
+    Wrapper class for training and evaluating the SpectrogramTransformerEncoder model.
+    """
+    def __init__(
+        self,
+        num_classes: int = 10,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_encoder_layers: int = 6,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        n_fft: int = 400,
+        hop_length: int = 160,
+        n_mels: int = 128,
+        base_filters: int = 32,
+        sample_rate: int = 16000,
+        learning_rate: float = 1e-4
+    ):
+        self.model = SpectrogramTransformerEncoder(
+            num_classes=num_classes,
+            d_model=d_model,
+            nhead=nhead,
+            num_encoder_layers=num_encoder_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            base_filters=base_filters,
+            sample_rate=sample_rate
+        )
+        
+        # Initialize optimizer with weight decay
+        decay, no_decay = [], []
+        for name, param in self.model.named_parameters():
+            if 'norm' in name or 'bias' in name:
+                no_decay.append(param)
+            else:
+                decay.append(param)
+                
+        optimizer_grouped_parameters = [
+            {'params': decay, 'weight_decay': 0.01},
+            {'params': no_decay, 'weight_decay': 0.0}
+        ]
+        
+        self.optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=learning_rate)
+        
+        # Learning rate scheduler
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=3
+        )
+        
+        self.criterion = nn.CrossEntropyLoss()
+    
+    def train_step(self, batch: dict) -> dict:
+        """
+        Perform a single training step.
+        
+        Args:
+            batch: Dictionary containing 'waveform' and 'label'
+            
+        Returns:
+            Dictionary with training metrics
+        """
+        self.model.train()
+        self.optimizer.zero_grad()
+        
+        waveform = batch['waveform']
+        labels = batch['label']
+        
+        # Forward pass
+        logits = self.model(waveform)
+        loss = self.criterion(logits, labels)
+        
+        # Backward pass
+        loss.backward()
+        
+        # Clip gradients to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        
+        self.optimizer.step()
+        
+        # Calculate accuracy
+        preds = torch.argmax(logits, dim=1)
+        accuracy = (preds == labels).float().mean().item()
+        
+        return {
+            'loss': loss.item(),
+            'accuracy': accuracy
+        }
+    
+    def evaluate(self, data_loader):
+        """
+        Evaluate the model on a dataset.
+        
+        Args:
+            data_loader: DataLoader for the dataset
+            
+        Returns:
+            Dictionary of metrics (loss, accuracy)
+        """
+        device = next(self.model.parameters()).device
         self.model.eval()
         total_loss = 0
         correct = 0

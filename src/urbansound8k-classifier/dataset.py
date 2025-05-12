@@ -25,7 +25,7 @@ class UrbanSoundDataset(Dataset):
         augment: bool = False,
         num_augmentations: int = 0,  # Number of augmented copies to generate (0 means no augmentation)
         split_ratio = 0.8,
-        cache_size: int = 1000  # Number of samples to cache in memory
+        cache_size: int = 2048  # Number of samples to cache in memory
     ):
         """
         Initialize the UrbanSound8K dataset.
@@ -114,7 +114,7 @@ class UrbanSoundDataset(Dataset):
         
         return original_idx, aug_id
     
-    @functools.lru_cache(maxsize=8)  # Cache the last 8 items returned
+    @functools.lru_cache(maxsize=128)  # Cache the last 256 items returned
     def __getitem__(self, idx):
         # Map to original index and augmentation ID
         original_idx, aug_id = self._get_original_index_and_aug_id(idx)

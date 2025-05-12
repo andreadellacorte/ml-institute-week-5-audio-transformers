@@ -50,12 +50,12 @@ def train_model_with_config():
         # Set random seed
         set_seed(config.seed)
         
-        # Create datasets
+        # Create datasets with num_augmentations (replaces use_augmentation)
         print("Loading datasets...")
         train_dataset, test_dataset = get_datasets(
             sample_rate=config.sample_rate,
             target_length=config.sample_rate * 4,  # 4 seconds of audio
-            augment=config.use_augmentation,
+            num_augmentations=config.num_augmentations,  # Use num_augmentations parameter (0 = no augmentation)
             max_length=None,  # Use all available data
             split_ratio=config.split_ratio
         )
@@ -81,9 +81,15 @@ def train_model_with_config():
             persistent_workers=True
         )
         
-        # Log dataset info to wandb
+        # Log dataset info to wandb, including original vs augmented counts
+        original_count = len(train_dataset.dataset)
+        total_count = len(train_dataset)
+        augmented_count = total_count - original_count
+        
         wandb.config.update({
-            "train_size": len(train_dataset),
+            "train_size_total": len(train_dataset),
+            "train_size_original": original_count,
+            "train_size_augmented": augmented_count,
             "test_size": len(test_dataset),
             "timestamp": timestamp
         })
@@ -347,8 +353,8 @@ def create_sweep_config():
             'split_ratio': {
                 'value': 0.9  # Train/test split ratio
             },
-            'use_augmentation': {
-                'values': [True, False]  # Whether to use data augmentation
+            'num_augmentations': {
+                'values': [0, 1, 3, 5]  # 0 = no augmentation, >0 = number of augmented copies per original
             },
             
             # System parameters

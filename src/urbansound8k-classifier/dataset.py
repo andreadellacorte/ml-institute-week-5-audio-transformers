@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset, Audio
 from typing import List, Optional, Tuple
 import numpy as np
@@ -23,6 +23,7 @@ class UrbanSoundDataset(Dataset):
         fold: Optional[int] = None,
         target_length: Optional[int] = None,
         augment: bool = False,
+        num_augmentations: int = 0,  # Number of augmented copies to generate (0 means no augmentation)
         split_ratio = 0.8,
         cache_size: int = 1000  # Number of samples to cache in memory
     ):
@@ -36,11 +37,14 @@ class UrbanSoundDataset(Dataset):
             fold: If provided, only includes data from this fold
             target_length: If provided, pad/trim all audio to this length
             augment: Whether to apply data augmentation
+            num_augmentations: Number of augmented copies to generate per sample (0 means no augmentation)
+            split_ratio: Ratio for train/test split if not using folds
             cache_size: Maximum number of samples to cache in memory
         """
         self.sample_rate = sample_rate
         self.target_length = target_length
         self.augment = augment
+        self.num_augmentations = num_augmentations
         self.split_ratio = split_ratio
         self._cache = {}  # Initialize cache dictionary
         self._cache_size = cache_size
@@ -76,17 +80,52 @@ class UrbanSoundDataset(Dataset):
         # Create label to index mapping
         self.class_names = sorted(list(set(self.dataset["classID"])))
         self.class_to_idx = {cls_id: i for i, cls_id in enumerate(self.class_names)}
+        
+        # Flag to determine if we're returning augmented variants
+        self.use_multiple_augmentations = augment and num_augmentations > 0
+        
+        # Calculate actual dataset length based on augmentations
+        self._effective_length = len(self.dataset)
+        if self.use_multiple_augmentations:
+            # Each original sample + num_augmentations additional samples
+            self._effective_length = len(self.dataset) * (1 + num_augmentations)
     
     def __len__(self):
-        return len(self.dataset)
+        return self._effective_length
+    
+    def _get_original_index_and_aug_id(self, idx):
+        """
+        Map global index to original dataset index and augmentation ID.
+        
+        For example, if num_augmentations=2:
+        - Global indices 0, 1, 2 map to original sample 0 with aug_ids 0, 1, 2
+        - Global indices 3, 4, 5 map to original sample 1 with aug_ids 0, 1, 2
+        - etc.
+        
+        Where aug_id 0 means "no augmentation" (original sample)
+        """
+        if not self.use_multiple_augmentations:
+            return idx, 0
+        
+        # Each original sample has (1 + num_augmentations) entries
+        items_per_original = 1 + self.num_augmentations
+        original_idx = idx // items_per_original
+        aug_id = idx % items_per_original  # 0 means original, 1+ means augmented
+        
+        return original_idx, aug_id
     
     @functools.lru_cache(maxsize=8)  # Cache the last 8 items returned
     def __getitem__(self, idx):
-        # Check if item is in cache
-        if idx in self._cache:
-            return self._cache[idx]
+        # Map to original index and augmentation ID
+        original_idx, aug_id = self._get_original_index_and_aug_id(idx)
         
-        item = self.dataset[idx]
+        # Check if item is in cache
+        cache_key = (original_idx, aug_id)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        
+        # Get the original item data
+        item = self.dataset[original_idx]
         
         # Load audio and convert to tensor
         audio_data = item["audio"]["array"]
@@ -105,15 +144,22 @@ class UrbanSoundDataset(Dataset):
                 padding = self.target_length - waveform.size(1)
                 waveform = torch.nn.functional.pad(waveform, (0, padding))
             elif waveform.size(1) > self.target_length:
-                # Trim (take a random segment for training data)
-                if self.augment:
+                # Trim
+                if aug_id > 0:  # Take a random segment for augmented samples
                     start = torch.randint(0, waveform.size(1) - self.target_length + 1, (1,)).item()
                     waveform = waveform[:, start:start + self.target_length]
-                else:
+                else:  # Take the beginning for original samples (deterministic)
                     waveform = waveform[:, :self.target_length]
         
-        # Apply augmentation if enabled
-        if self.augment:
+        # Apply augmentation for non-zero aug_id if using multiple augmentations
+        if self.use_multiple_augmentations and aug_id > 0:
+            # Set a unique seed for each (sample_idx, aug_id) combination for reproducibility
+            # But still have different augmentations for each aug_id
+            seed = hash((original_idx, aug_id)) % (2**32)
+            torch.manual_seed(seed)
+            waveform = self._augment_audio(waveform)
+        # Apply augmentation if enabled but not using multiple augmentations
+        elif self.augment and not self.use_multiple_augmentations:
             waveform = self._augment_audio(waveform)
         
         # Get label
@@ -124,17 +170,19 @@ class UrbanSoundDataset(Dataset):
             "sample_rate": self.sample_rate,
             "label": label,
             "class_name": item["class"],
+            "is_augmented": aug_id > 0,  # Flag to indicate if this is an augmented sample
+            "original_index": original_idx  # Store the original index for reference
         }
         
         # Cache the result if cache isn't full
         if len(self._cache) < self._cache_size:
-            self._cache[idx] = result
-            self._cache_keys.append(idx)
+            self._cache[cache_key] = result
+            self._cache_keys.append(cache_key)
         elif self._cache_keys:  # If cache is full, remove oldest item
-            old_idx = self._cache_keys.pop(0)
-            del self._cache[old_idx]
-            self._cache[idx] = result
-            self._cache_keys.append(idx)
+            old_key = self._cache_keys.pop(0)
+            del self._cache[old_key]
+            self._cache[cache_key] = result
+            self._cache_keys.append(cache_key)
         
         return result
     
@@ -166,7 +214,7 @@ def get_datasets(
     max_length: Optional[int] = None,
     fold_split: Optional[Tuple[List[int], List[int]]] = None,
     target_length: Optional[int] = None,
-    augment: bool = False,
+    num_augmentations: int = 0,  # Number of augmented copies per original sample (0 = no augmentation)
     split_ratio: float = 0.8
 ):
     """
@@ -177,7 +225,7 @@ def get_datasets(
         max_length: Maximum number of samples to include in each dataset
         fold_split: Optional tuple of (train_folds, test_folds) to use specific folds
         target_length: If provided, pad/trim all audio to this length
-        augment: Whether to apply data augmentation (train only)
+        num_augmentations: Number of augmented copies to generate per sample (0 = no augmentation)
         split_ratio: Ratio for train/test split if not using folds
         
     Returns:
@@ -196,7 +244,8 @@ def get_datasets(
                     max_length=max_length,
                     fold=fold,
                     target_length=target_length,
-                    augment=augment,
+                    augment=num_augmentations > 0,  # Enable augmentation if num_augmentations > 0
+                    num_augmentations=num_augmentations,
                     split_ratio=split_ratio
                 )
             )
@@ -211,6 +260,7 @@ def get_datasets(
                     fold=fold,
                     target_length=target_length,
                     augment=False,  # No augmentation for test data
+                    num_augmentations=0,  # No augmented copies for test data
                     split_ratio=split_ratio
                 )
             )
@@ -225,7 +275,8 @@ def get_datasets(
             sample_rate=sample_rate,
             max_length=max_length,
             target_length=target_length, 
-            augment=augment,
+            augment=num_augmentations > 0,  # Enable augmentation if num_augmentations > 0
+            num_augmentations=num_augmentations,
             split_ratio=split_ratio
         )
         
@@ -235,6 +286,7 @@ def get_datasets(
             max_length=max_length,
             target_length=target_length, 
             augment=False,  # No augmentation for test data
+            num_augmentations=0,  # No augmented copies for test data
             split_ratio=split_ratio
         )
     
@@ -244,18 +296,28 @@ def get_datasets(
 if __name__ == "__main__":
     # Example usage with dataset
     print("=== UrbanSound8K Dataset Example ===")
+    
+    # Create dataset with original + augmented samples (3 augmentations per original)
     train_dataset, test_dataset = get_datasets(
         sample_rate=16000,
         target_length=16000 * 4,  # 4 seconds of audio at 16kHz
+        num_augmentations=3  # Each original sample + 3 augmented versions
     )
     
-    print(f"Train dataset size: {len(train_dataset)}")
+    # Calculate how many are original vs augmented
+    original_count = len(train_dataset.dataset)
+    total_count = len(train_dataset)
+    augmented_count = total_count - original_count
+    
+    print(f"Train dataset size: {len(train_dataset)} (Original: {original_count}, Augmented: {augmented_count})")
     print(f"Test dataset size: {len(test_dataset)}")
     
-    # Get a sample from the dataset
-    sample = train_dataset[0]
-    print(f"Sample waveform shape: {sample['waveform'].shape}")
-    print(f"Sample label: {sample['label']} ({sample['class_name']})")
+    # Get original and augmented samples
+    original_sample = train_dataset[0]  # First sample should be original
+    augmented_sample = train_dataset[1]  # Second sample should be augmented version of first
+    
+    print(f"Original sample: index={original_sample['original_index']}, augmented={original_sample['is_augmented']}")
+    print(f"Augmented sample: index={augmented_sample['original_index']}, augmented={augmented_sample['is_augmented']}")
     
     # Test with data loader
     from torch.utils.data import DataLoader
@@ -270,5 +332,6 @@ if __name__ == "__main__":
     for batch in train_loader:
         print(f"Batch waveform shape: {batch['waveform'].shape}")
         print(f"Batch labels: {batch['label']}")
+        print(f"Batch is_augmented flags: {batch['is_augmented']}")
         print(f"Batch processed successfully!")
         break

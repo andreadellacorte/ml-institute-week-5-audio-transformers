@@ -2,6 +2,8 @@ import torch
 from torch.utils.data import Dataset
 from datasets import load_dataset, Audio
 from typing import List, Optional, Tuple
+import numpy as np
+import functools
 
 
 class UrbanSoundDataset(Dataset):
@@ -21,7 +23,8 @@ class UrbanSoundDataset(Dataset):
         fold: Optional[int] = None,
         target_length: Optional[int] = None,
         augment: bool = False,
-        split_ratio = 0.8
+        split_ratio = 0.8,
+        cache_size: int = 1000  # Number of samples to cache in memory
     ):
         """
         Initialize the UrbanSound8K dataset.
@@ -33,11 +36,15 @@ class UrbanSoundDataset(Dataset):
             fold: If provided, only includes data from this fold
             target_length: If provided, pad/trim all audio to this length
             augment: Whether to apply data augmentation
+            cache_size: Maximum number of samples to cache in memory
         """
         self.sample_rate = sample_rate
         self.target_length = target_length
         self.augment = augment
         self.split_ratio = split_ratio
+        self._cache = {}  # Initialize cache dictionary
+        self._cache_size = cache_size
+        self._cache_keys = []  # LRU tracking
         
         # Load dataset from Hugging Face
         self.dataset = load_dataset("danavery/urbansound8K", split="train")
@@ -69,11 +76,16 @@ class UrbanSoundDataset(Dataset):
         # Create label to index mapping
         self.class_names = sorted(list(set(self.dataset["classID"])))
         self.class_to_idx = {cls_id: i for i, cls_id in enumerate(self.class_names)}
-
+    
     def __len__(self):
         return len(self.dataset)
     
+    @functools.lru_cache(maxsize=8)  # Cache the last 8 items returned
     def __getitem__(self, idx):
+        # Check if item is in cache
+        if idx in self._cache:
+            return self._cache[idx]
+        
         item = self.dataset[idx]
         
         # Load audio and convert to tensor
@@ -93,8 +105,12 @@ class UrbanSoundDataset(Dataset):
                 padding = self.target_length - waveform.size(1)
                 waveform = torch.nn.functional.pad(waveform, (0, padding))
             elif waveform.size(1) > self.target_length:
-                # Trim
-                waveform = waveform[:, :self.target_length]
+                # Trim (take a random segment for training data)
+                if self.augment:
+                    start = torch.randint(0, waveform.size(1) - self.target_length + 1, (1,)).item()
+                    waveform = waveform[:, start:start + self.target_length]
+                else:
+                    waveform = waveform[:, :self.target_length]
         
         # Apply augmentation if enabled
         if self.augment:
@@ -103,28 +119,42 @@ class UrbanSoundDataset(Dataset):
         # Get label
         label = self.class_to_idx[item["classID"]]
         
-        return {
+        result = {
             "waveform": waveform,
             "sample_rate": self.sample_rate,
             "label": label,
             "class_name": item["class"],
         }
+        
+        # Cache the result if cache isn't full
+        if len(self._cache) < self._cache_size:
+            self._cache[idx] = result
+            self._cache_keys.append(idx)
+        elif self._cache_keys:  # If cache is full, remove oldest item
+            old_idx = self._cache_keys.pop(0)
+            del self._cache[old_idx]
+            self._cache[idx] = result
+            self._cache_keys.append(idx)
+        
+        return result
     
     def _augment_audio(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Apply random augmentations to the audio waveform."""
-        # Random gain adjustment (volume)
-        if torch.rand(1) > 0.5:
+        """Apply random augmentations to the audio waveform more efficiently."""
+        # Apply a single augmentation type based on random choice
+        # This is faster than checking each augmentation separately
+        aug_type = torch.randint(0, 3, (1,)).item()
+        
+        if aug_type == 0:  # Random gain adjustment (volume)
             gain = 0.5 + torch.rand(1) * 1.0  # Random gain between 0.5 and 1.5
             waveform = waveform * gain
-        
-        # Random time shift
-        if torch.rand(1) > 0.5:
+        elif aug_type == 1:  # Random time shift
             shift_amount = int(waveform.shape[1] * 0.1 * torch.rand(1))  # Up to 10% shift
-            if torch.rand(1) > 0.5:  # Left or right shift
-                waveform = torch.roll(waveform, shifts=shift_amount, dims=1)
-            else:
-                waveform = torch.roll(waveform, shifts=-shift_amount, dims=1)
-        
+            direction = 1 if torch.rand(1) > 0.5 else -1  # Left or right shift
+            waveform = torch.roll(waveform, shifts=shift_amount * direction, dims=1)
+        elif aug_type == 2:  # Random noise
+            noise = torch.randn_like(waveform) * 0.005
+            waveform = waveform + noise
+            
         # Ensure values are in the valid range
         waveform = torch.clamp(waveform, -1.0, 1.0)
         
@@ -140,22 +170,23 @@ def get_datasets(
     split_ratio: float = 0.8
 ):
     """
-    Create train and test dataset splits.
+    Get train and test datasets for the UrbanSound8K dataset.
     
     Args:
-        sample_rate: Target sample rate
-        max_length: Maximum samples per split
-        fold_split: Tuple of (train_folds, test_folds) if using fold-based splits
-        target_length: Pad/trim audio to this length
-        augment: Whether to apply data augmentation to training data
+        sample_rate: Target sample rate for audio
+        max_length: Maximum number of samples to include in each dataset
+        fold_split: Optional tuple of (train_folds, test_folds) to use specific folds
+        target_length: If provided, pad/trim all audio to this length
+        augment: Whether to apply data augmentation (train only)
+        split_ratio: Ratio for train/test split if not using folds
         
     Returns:
         Tuple of (train_dataset, test_dataset)
     """
-    if fold_split:
+    if fold_split is not None:
         train_folds, test_folds = fold_split
         
-        # Create datasets using specific folds
+        # Create datasets for each train fold
         train_datasets = []
         for fold in train_folds:
             train_datasets.append(

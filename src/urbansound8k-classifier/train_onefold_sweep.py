@@ -2,15 +2,12 @@ import wandb
 import torch
 import argparse
 import os
-import sys
 from pathlib import Path
 from torch.utils.data import DataLoader
 from datetime import datetime
 from tqdm import tqdm  # Import tqdm for progress bars
 
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import CHECKPOINTS_DATA_DIR
+from src.config import CHECKPOINTS_DATA_DIR
 from dataset import get_datasets
 from model import AudioClassifier
 from torch.amp import autocast  # Updated import from torch.amp instead of torch.cuda.amp
@@ -298,7 +295,7 @@ def create_sweep_config():
     sweep_config = {
         'method': 'bayes',  # Bayesian optimization
         'metric': {
-            'name': 'final_eval_accuracy',
+            'name': 'best_eval_accuracy',
             'goal': 'maximize'  # We want to maximize accuracy
         },
         'parameters': {

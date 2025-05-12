@@ -18,10 +18,6 @@ install:
 	fi
 	./setup.sh $(mode)
 
-.phony: activate
-activate:
-	@source .venv/bin/activate
-
 ## Delete all compiled Python files
 .PHONY: clean
 clean:

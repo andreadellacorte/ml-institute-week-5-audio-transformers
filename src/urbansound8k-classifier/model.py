@@ -47,9 +47,13 @@ class AudioFeatureExtractor(nn.Module):
         Returns:
             Audio features [batch_size, sequence_length, feature_dim]
         """
+        # Store original dtype for consistent type handling
+        original_dtype = x.dtype
+        
         # Apply convolutional layers
         for conv in self.conv_layers:
-            x = conv(x)
+            # Ensure each layer gets input in the same dtype as its parameters
+            x = conv(x.to(original_dtype))
             
         # Transpose to [batch_size, sequence_length, features]
         return x.transpose(1, 2)
@@ -127,6 +131,13 @@ class SpectrogramFeatureExtractor(nn.Module):
         """
         batch_size = x.size(0)
         
+        # Store original dtype to ensure we return the same type
+        original_dtype = x.dtype
+        
+        # Convert to float32 for spectrogram processing
+        if x.dtype != torch.float32:
+            x = x.to(torch.float32)
+        
         # Convert to mono if needed
         if x.size(1) > 1:
             x = torch.mean(x, dim=1, keepdim=True)
@@ -147,6 +158,10 @@ class SpectrogramFeatureExtractor(nn.Module):
             mean = x.mean(dim=(2, 3), keepdim=True)
             std = x.std(dim=(2, 3), keepdim=True) + 1e-5
             x = (x - mean) / std
+        
+        # Convert back to original dtype before going through conv layers
+        # This ensures that both inputs and weights/biases have the same type
+        x = x.to(original_dtype)
             
         # Apply 2D convolutional layers
         for conv in self.conv_layers:

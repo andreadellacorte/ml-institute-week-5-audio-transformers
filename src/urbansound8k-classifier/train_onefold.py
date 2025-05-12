@@ -227,6 +227,7 @@ if __name__ == "__main__":
             import traceback
             traceback.print_exc()
         finally:
+            print("Cleaning up...")
             wandb.finish()
             print("Example complete")
     
@@ -239,3 +240,4 @@ if __name__ == "__main__":
     finally:
         print("Cleaning up...")
         wandb.finish()
+        print("Training complete")

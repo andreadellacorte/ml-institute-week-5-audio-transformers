@@ -28,16 +28,17 @@ def get_config():
     # Default configuration
     config = {
         # Model parameters
-        "d_model": 64,
+        "d_model": 256,
         "nhead": 4,
-        "num_encoder_layers": 2,
+        "num_encoder_layers": 4,
         "dim_feedforward": 256,
         "dropout": 0.1,
         "feature_extractor_base_filters": 32,
+        "split_ratio": 0.8,
         
         # Training parameters
         "batch_size": 128,
-        "num_epochs": 2,
+        "num_epochs": 5,
         "learning_rate": 1e-4,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         
@@ -68,7 +69,8 @@ if __name__ == "__main__":
             sample_rate=config["sample_rate"],
             target_length=config["target_length"],
             augment=config["use_augmentation"],
-            max_length=None  # Use all available data
+            max_length=None,  # Use all available data
+            split_ratio=config["split_ratio"],
         )
 
         print(f"Datasets loaded. Train: {len(train_dataset)}, Test: {len(test_dataset)}")

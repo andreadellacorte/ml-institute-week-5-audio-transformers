@@ -266,7 +266,7 @@ class AudioClassifier:
         
         # Learning rate scheduler with warm-up and cosine decay
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=3, verbose=True
+            self.optimizer, mode='min', factor=0.5, patience=3
         )
         
         self.criterion = nn.CrossEntropyLoss()

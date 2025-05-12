@@ -304,38 +304,38 @@ def create_sweep_config():
         'parameters': {
             # Model architecture parameters
             'd_model': {
-                'values': [64, 128, 256, 512]  # Model dimension
+                'values': [256, 512]  # Model dimension
             },
             'nhead': {
-                'values': [2, 4, 8]  # Number of attention heads
+                'values': [8, 16]  # Number of attention heads
             },
             'num_encoder_layers': {
-                'values': [2, 3, 4]  # Number of encoder layers
+                'values': [4, 6, 8]  # Number of encoder layers
             },
             'dim_feedforward': {
-                'values': [64, 128, 256, 512]  # Feed-forward dimension
+                'values': [512, 1024, 2048]  # Feed-forward dimension
             },
             'dropout': {
-                'values': [0.1, 0.2, 0.3]  # Dropout rate
+                'values': [0.05, 0.1, 0.2]  # Dropout rate
             },
             'feature_extractor_base_filters': {
-                'values': [16, 32, 64]  # Base filters for feature extractor
+                'values': [16, 32]  # Base filters for feature extractor
             },
             
             # Training parameters
             'batch_size': {
-                'values': [256, 512]  # Batch size
+                'values': [256]  # Batch size
             },
             'learning_rate': {
                 'distribution': 'log_uniform_values',
-                'min': 1e-5,
+                'min': 1e-6,
                 'max': 1e-3
             },
             'num_epochs': {
-                'value': 10  # Fixed to avoid wasting resources
+                'value': 20  # Fixed to avoid wasting resources
             },
             'gradient_accumulation_steps': {
-                'values': [1, 2, 4, 8]  # Gradient accumulation steps
+                'values': [0, 1]  # Gradient accumulation steps
             },
             
             # Early stopping parameters
@@ -375,7 +375,7 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Run a hyperparameter sweep with wandb")
     parser.add_argument('--count', type=int, default=120, help='Number of runs to perform in the sweep')
-    parser.add_argument('--project', type=str, default="mlx7-week-5-urbansound8k-sweep", 
+    parser.add_argument('--project', type=str, default="mlx7-week-5-urbansound8k-classifier", 
                         help='wandb project name')
     args = parser.parse_args()
     

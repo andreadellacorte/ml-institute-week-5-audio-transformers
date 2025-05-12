@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import math
 from typing import Optional, Tuple
 
 
@@ -29,14 +30,14 @@ class AudioFeatureExtractor(nn.Module):
                 nn.Sequential(
                     nn.Conv1d(current_channels, out_channels, kernel_size, stride=stride, padding=kernel_size // 2),
                     nn.BatchNorm1d(out_channels),
-                    nn.ReLU(),
+                    nn.GELU(),  # Replace ReLU with GELU for better performance
                     nn.Dropout(0.1)
                 )
             )
             current_channels = out_channels
             
         self.output_dim = current_channels
-            
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -57,31 +58,28 @@ class PositionalEncoding(nn.Module):
     """
     Adds positional encoding to the input embeddings.
     """
-    def __init__(self, d_model: int, max_seq_length: int = 5000, dropout: float = 0.1):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
         
-        # Create positional encodings
-        pe = torch.zeros(max_seq_length, d_model)
-        position = torch.arange(0, max_seq_length, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model)
-        )
-        
+        # Create a positional encoding matrix of shape (max_len, d_model)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0)
         
-        # Register buffer (not a parameter, but part of the module)
+        # Register as a buffer (not a parameter)
         self.register_buffer('pe', pe)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Embeddings [batch_size, seq_length, embedding_dim]
+            x: Input tensor [batch_size, seq_length, d_model]
             
         Returns:
-            Embeddings with positional encoding added [batch_size, seq_length, embedding_dim]
+            Output tensor with positional encoding added [batch_size, seq_length, d_model]
         """
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
@@ -107,7 +105,7 @@ class TransformerEncoderBlock(nn.Module):
         # Feed-forward network
         self.feed_forward = nn.Sequential(
             nn.Linear(d_model, dim_feedforward),
-            nn.ReLU(),
+            nn.GELU(),  # Use GELU instead of ReLU for better performance
             nn.Dropout(dropout),
             nn.Linear(dim_feedforward, d_model)
         )
@@ -128,17 +126,21 @@ class TransformerEncoderBlock(nn.Module):
         Returns:
             Output tensor [batch_size, seq_length, d_model]
         """
-        # Self-attention with residual connection and normalization
+        # Pre-LayerNorm pattern (tends to be more stable) instead of Post-LayerNorm
+        x_norm = self.norm1(x)
+        
+        # Self-attention with residual connection
         attn_output, _ = self.self_attn(
-            query=self.norm1(x),
-            key=self.norm1(x),
-            value=self.norm1(x),
+            query=x_norm,
+            key=x_norm,
+            value=x_norm,
             attn_mask=mask
         )
         x = x + self.dropout(attn_output)
         
-        # Feed-forward with residual connection and normalization
-        ff_output = self.feed_forward(self.norm2(x))
+        # Feed-forward with residual connection
+        x_norm = self.norm2(x)
+        ff_output = self.feed_forward(x_norm)
         x = x + self.dropout(ff_output)
         
         return x
@@ -190,7 +192,7 @@ class AudioTransformerEncoder(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(d_model, num_classes)
         )
-        
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -246,12 +248,29 @@ class AudioClassifier:
             feature_extractor_base_filters=feature_extractor_base_filters
         )
         
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=5
-        )
-        self.criterion = nn.CrossEntropyLoss()
+        # Initialize with optimizer that has weight decay (exclude norm layers and biases)
+        # This helps with generalization and training stability
+        decay, no_decay = [], []
+        for name, param in self.model.named_parameters():
+            if 'norm' in name or 'bias' in name:
+                no_decay.append(param)
+            else:
+                decay.append(param)
+                
+        optimizer_grouped_parameters = [
+            {'params': decay, 'weight_decay': 0.01},
+            {'params': no_decay, 'weight_decay': 0.0}
+        ]
         
+        self.optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=learning_rate)
+        
+        # Learning rate scheduler with warm-up and cosine decay
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=3, verbose=True
+        )
+        
+        self.criterion = nn.CrossEntropyLoss()
+    
     def train_step(self, batch: dict) -> dict:
         """
         Perform a single training step.
@@ -274,6 +293,10 @@ class AudioClassifier:
         
         # Backward pass
         loss.backward()
+        
+        # Clip gradients to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        
         self.optimizer.step()
         
         # Calculate accuracy

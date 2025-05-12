@@ -332,7 +332,7 @@ def create_sweep_config():
                 'value': 20  # Fixed to avoid wasting resources
             },
             'gradient_accumulation_steps': {
-                'values': [0, 1]  # Gradient accumulation steps
+                'values': [1, 2]  # Gradient accumulation steps
             },
             
             # Early stopping parameters

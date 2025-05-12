@@ -285,25 +285,27 @@ class AudioClassifier:
             'accuracy': accuracy
         }
     
-    def evaluate(self, dataloader: torch.utils.data.DataLoader) -> dict:
+    def evaluate(self, data_loader):
         """
         Evaluate the model on a dataset.
         
         Args:
-            dataloader: DataLoader for evaluation
+            data_loader: DataLoader for the dataset
             
         Returns:
-            Dictionary with evaluation metrics
+            Dictionary of metrics (loss, accuracy)
         """
+        device = next(self.model.parameters()).device  # Get the device the model is on
         self.model.eval()
         total_loss = 0
         correct = 0
         total = 0
         
         with torch.no_grad():
-            for batch in dataloader:
-                waveform = batch['waveform']
-                labels = batch['label']
+            for batch in data_loader:
+                # Ensure data is on the correct device
+                waveform = batch['waveform'].to(device)
+                labels = batch['label'].to(device)
                 
                 # Forward pass
                 logits = self.model(waveform)
@@ -315,12 +317,9 @@ class AudioClassifier:
                 correct += (preds == labels).sum().item()
                 total += waveform.size(0)
         
-        # Update learning rate scheduler
-        self.scheduler.step(total_loss / total)
-        
         return {
-            'loss': total_loss / total,
-            'accuracy': correct / total
+            'loss': total_loss / total if total > 0 else float('inf'),
+            'accuracy': correct / total if total > 0 else 0
         }
     
     def predict(self, waveform: torch.Tensor) -> dict:

@@ -9,12 +9,27 @@ import wandb
 from torch.utils.data import DataLoader, ConcatDataset
 from pathlib import Path
 from tqdm import tqdm
+import random
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import CHECKPOINTS_DATA_DIR, FIGURES_DIR
 from dataset import UrbanSoundDataset
 from model import AudioClassifier
+
+# Set default seed for reproducibility
+def set_seed(seed=42):
+    """
+    Set seed for all random number generators for reproducibility.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to {seed} for reproducibility")
 
 # Constants
 NUM_FOLDS = 10
@@ -164,6 +179,9 @@ def train_model_with_cross_validation(config):
     """
     device = torch.device(config["device"])
     print(f"Using device: {device}")
+    
+    # Set seed for reproducibility
+    set_seed()
     
     # Load all fold datasets
     fold_datasets = load_fold_datasets(config)

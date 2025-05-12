@@ -4,6 +4,24 @@ import argparse
 import torch
 from datetime import datetime
 from src.config import CHECKPOINTS_DATA_DIR
+from tqdm import tqdm
+import numpy as np
+import random
+import os
+
+# Set default seed for reproducibility
+def set_seed(seed=42):
+    """
+    Set seed for all random number generators for reproducibility.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to {seed} for reproducibility")
 
 def setup_wandb(config):
     """
@@ -51,6 +69,9 @@ def get_config():
     return config
 
 if __name__ == "__main__":
+    # Set seed for reproducibility
+    set_seed()
+
     # Get config from args
     config = get_config()
     
@@ -64,7 +85,6 @@ if __name__ == "__main__":
     # Create datasets with timeout protection for loading only
     print("Loading datasets...")
     try:
-        
         train_dataset, test_dataset = get_datasets(
             sample_rate=config["sample_rate"],
             target_length=config["target_length"],
@@ -80,13 +100,13 @@ if __name__ == "__main__":
             train_dataset, 
             batch_size=config["batch_size"], 
             shuffle=True, 
-            num_workers=2
+            num_workers=4
         )
         test_loader = DataLoader(
             test_dataset, 
             batch_size=config["batch_size"], 
             shuffle=False, 
-            num_workers=2
+            num_workers=4
         )
         
         # Log dataset info to wandb
@@ -121,7 +141,11 @@ if __name__ == "__main__":
                 epoch_accuracy = 0.0
                 num_batches = 0
                 
-                for i, batch in enumerate(train_loader):
+                # Use tqdm for progress bar with ETA
+                progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']}", 
+                                   leave=True, ncols=100)
+                
+                for i, batch in enumerate(progress_bar):
                     # Move data to device
                     batch['waveform'] = batch['waveform'].to(device)
                     batch['label'] = batch['label'].to(device)
@@ -132,23 +156,23 @@ if __name__ == "__main__":
                     epoch_accuracy += metrics['accuracy']
                     num_batches += 1
                     
-                    # Log individual steps to wandb
-                    if (i+1) % 10 == 0:
-                        wandb.log({
-                            "step_loss": metrics['loss'],
-                            "step_accuracy": metrics['accuracy'],
-                            "step": i + epoch * len(train_loader)
-                        })
+                    # Update progress bar with current metrics
+                    progress_bar.set_postfix({
+                        'loss': f"{metrics['loss']:.4f}", 
+                        'acc': f"{metrics['accuracy']:.4f}"
+                    })
                     
-                    # Print progress every 10 batches
-                    if (i+1) % 10 == 0:
-                        print(f"  Step {i+1}/{len(train_loader)}: Loss = {metrics['loss']:.4f}, Accuracy = {metrics['accuracy']:.4f}")
+                    wandb.log({
+                        "step_loss": metrics['loss'],
+                        "step_accuracy": metrics['accuracy'],
+                        "step": i + epoch * len(train_loader)
+                    })
                 
                 # Print epoch summary
                 avg_loss = epoch_loss / num_batches
                 avg_accuracy = epoch_accuracy / num_batches
                 print(f"Epoch {epoch+1} complete - Avg Loss: {avg_loss:.4f}, Avg Accuracy: {avg_accuracy:.4f}")
-                
+            
                 # Log epoch metrics to wandb
                 wandb.log({
                     "epoch": epoch,

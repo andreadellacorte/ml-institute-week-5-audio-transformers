@@ -137,6 +137,7 @@ def get_datasets(
     fold_split: Optional[Tuple[List[int], List[int]]] = None,
     target_length: Optional[int] = None,
     augment: bool = False,
+    split_ratio: float = 0.8
 ):
     """
     Create train and test dataset splits.
@@ -164,7 +165,8 @@ def get_datasets(
                     max_length=max_length,
                     fold=fold,
                     target_length=target_length,
-                    augment=augment
+                    augment=augment,
+                    split_ratio=split_ratio
                 )
             )
         
@@ -177,7 +179,8 @@ def get_datasets(
                     max_length=max_length,
                     fold=fold,
                     target_length=target_length,
-                    augment=False  # No augmentation for test data
+                    augment=False,  # No augmentation for test data
+                    split_ratio=split_ratio
                 )
             )
         
@@ -191,7 +194,8 @@ def get_datasets(
             sample_rate=sample_rate,
             max_length=max_length,
             target_length=target_length, 
-            augment=augment
+            augment=augment,
+            split_ratio=split_ratio
         )
         
         test_dataset = UrbanSoundDataset(
@@ -200,6 +204,7 @@ def get_datasets(
             max_length=max_length,
             target_length=target_length, 
             augment=False  # No augmentation for test data
+            split_ratio=split_ratio
         )
     
     return train_dataset, test_dataset

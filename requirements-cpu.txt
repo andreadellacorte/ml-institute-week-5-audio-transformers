@@ -7,6 +7,7 @@ ipython
 ipywidgets
 isort
 jupyterlab
+librosa
 loguru
 matplotlib
 notebook
@@ -21,7 +22,9 @@ scikit-learn
 seaborn
 streamlit
 sortedcontainers
+soundfile
 torch
+torchaudio
 torchvision
 transformers
 tqdm

@@ -8,6 +8,7 @@ from tqdm import tqdm
 import numpy as np
 import random
 import os
+from torch.cuda.amp import autocast, GradScaler  # Add imports for mixed precision
 
 # Set default seed for reproducibility
 def set_seed(seed=42):
@@ -59,6 +60,8 @@ def get_config():
         "num_epochs": 5,
         "learning_rate": 1e-4,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "use_mixed_precision": True,  # Enable mixed precision by default
+        "gradient_accumulation_steps": 1,  # Enable gradient accumulation
         
         # Dataset parameters
         "sample_rate": 16000,
@@ -100,13 +103,17 @@ if __name__ == "__main__":
             train_dataset, 
             batch_size=config["batch_size"], 
             shuffle=True, 
-            num_workers=4
+            num_workers=4,
+            pin_memory=True,  # Enable pinned memory for faster data transfer to GPU
+            persistent_workers=True  # Keep workers alive between iterations
         )
         test_loader = DataLoader(
             test_dataset, 
             batch_size=config["batch_size"], 
             shuffle=False, 
-            num_workers=4
+            num_workers=4,
+            pin_memory=True,
+            persistent_workers=True
         )
         
         # Log dataset info to wandb
@@ -129,11 +136,23 @@ if __name__ == "__main__":
         )
         classifier.model.to(device)
         
+        # Enable cuDNN benchmark mode for optimized performance with fixed input sizes
+        if config["device"] == "cuda":
+            torch.backends.cudnn.benchmark = True
+        
+        # Initialize gradient scaler for mixed precision training
+        scaler = GradScaler(enabled=config["use_mixed_precision"] and config["device"] == "cuda")
+        
         # Log model graph to wandb
         wandb.watch(classifier.model, log="all", log_freq=10)
         
         print(f"Training for {config['num_epochs']} epochs (using all available data)...")
         try:
+            # Track best validation metrics for early stopping
+            best_eval_loss = float('inf')
+            early_stop_patience = 5
+            early_stop_counter = 0
+            
             # Training loop
             for epoch in range(config['num_epochs']):
                 print(f"\nEpoch {epoch+1}/{config['num_epochs']}")
@@ -145,26 +164,55 @@ if __name__ == "__main__":
                 progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['num_epochs']}", 
                                    leave=True, ncols=100)
                 
+                classifier.model.train()
+                
                 for i, batch in enumerate(progress_bar):
                     # Move data to device
-                    batch['waveform'] = batch['waveform'].to(device)
-                    batch['label'] = batch['label'].to(device)
+                    batch['waveform'] = batch['waveform'].to(device, non_blocking=True)  # non_blocking for async transfer
+                    batch['label'] = batch['label'].to(device, non_blocking=True)
                     
-                    # Train step
-                    metrics = classifier.train_step(batch)
-                    epoch_loss += metrics['loss']
-                    epoch_accuracy += metrics['accuracy']
+                    # Mixed precision training
+                    with autocast(enabled=config["use_mixed_precision"] and config["device"] == "cuda"):
+                        # Forward pass and loss calculation done in train_step
+                        logits = classifier.model(batch['waveform'])
+                        loss = classifier.criterion(logits, batch['label'])
+                        
+                        # Scale loss for gradient accumulation if enabled
+                        if config["gradient_accumulation_steps"] > 1:
+                            loss = loss / config["gradient_accumulation_steps"]
+                    
+                    # Backward pass with gradient scaling
+                    scaler.scale(loss).backward()
+                    
+                    # Only step optimizer after accumulating gradients
+                    if (i + 1) % config["gradient_accumulation_steps"] == 0:
+                        # Update weights with gradient scaling for mixed precision
+                        scaler.step(classifier.optimizer)
+                        scaler.update()
+                        classifier.optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+                    
+                    # Calculate metrics (use without gradient computation)
+                    with torch.no_grad():
+                        preds = torch.argmax(logits, dim=1)
+                        accuracy = (preds == batch['label']).float().mean().item()
+                    
+                    curr_loss = loss.item()
+                    if config["gradient_accumulation_steps"] > 1:
+                        curr_loss *= config["gradient_accumulation_steps"]
+                    
+                    epoch_loss += curr_loss
+                    epoch_accuracy += accuracy
                     num_batches += 1
                     
                     # Update progress bar with current metrics
                     progress_bar.set_postfix({
-                        'loss': f"{metrics['loss']:.4f}", 
-                        'acc': f"{metrics['accuracy']:.4f}"
+                        'loss': f"{curr_loss:.4f}", 
+                        'acc': f"{accuracy:.4f}"
                     })
                     
                     wandb.log({
-                        "step_loss": metrics['loss'],
-                        "step_accuracy": metrics['accuracy'],
+                        "step_loss": curr_loss,
+                        "step_accuracy": accuracy,
                         "step": i + epoch * len(train_loader)
                     })
                 
@@ -192,6 +240,29 @@ if __name__ == "__main__":
                     "eval_loss": eval_metrics['loss'],
                     "eval_accuracy": eval_metrics['accuracy']
                 })
+                
+                # Update scheduler based on validation loss
+                if hasattr(classifier, 'scheduler'):
+                    classifier.scheduler.step(eval_metrics['loss'])
+                
+                # Early stopping check
+                if eval_metrics['loss'] < best_eval_loss:
+                    best_eval_loss = eval_metrics['loss']
+                    early_stop_counter = 0
+                    
+                    # Save best model
+                    best_model_path = CHECKPOINTS_DATA_DIR / f"best_model_{wandb.run.id}.pt"
+                    CHECKPOINTS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+                    classifier.save(str(best_model_path))
+                    wandb.save(str(best_model_path))
+                    print(f"Saved best model with validation loss: {best_eval_loss:.4f}")
+                else:
+                    early_stop_counter += 1
+                    print(f"Validation loss did not improve for {early_stop_counter} epochs")
+                    
+                    if early_stop_counter >= early_stop_patience:
+                        print(f"Early stopping triggered after {epoch+1} epochs")
+                        break
             
             # Final evaluation
             print("\nFinal Evaluation...")
@@ -213,7 +284,7 @@ if __name__ == "__main__":
             # Create the directory if it doesn't exist
             CHECKPOINTS_DATA_DIR.mkdir(parents=True, exist_ok=True)
             
-            # Save model
+            # Save final model
             model_path = CHECKPOINTS_DATA_DIR / f"model_{wandb.run.id}.pt"
             classifier.save(str(model_path))
             

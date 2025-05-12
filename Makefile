@@ -11,8 +11,16 @@ PYTHON_INTERPRETER = python
 #################################################################################
 
 .PHONY: install
-requirements:
-	./setup.sh
+install:
+	@if [ -z "$(mode)" ]; then \
+		echo "Usage: make install mode=--gpu|--cpu"; \
+		exit 1; \
+	fi
+	./setup.sh $(mode)
+
+.phony: activate
+activate:
+	@source .venv/bin/activate
 
 ## Delete all compiled Python files
 .PHONY: clean

@@ -21,6 +21,7 @@ class UrbanSoundDataset(Dataset):
         fold: Optional[int] = None,
         target_length: Optional[int] = None,
         augment: bool = False,
+        split_ratio = 0.8
     ):
         """
         Initialize the UrbanSound8K dataset.
@@ -36,6 +37,7 @@ class UrbanSoundDataset(Dataset):
         self.sample_rate = sample_rate
         self.target_length = target_length
         self.augment = augment
+        self.split_ratio = split_ratio
         
         # Load dataset from Hugging Face
         self.dataset = load_dataset("danavery/urbansound8K", split="train")
@@ -50,7 +52,8 @@ class UrbanSoundDataset(Dataset):
             # Use standard split: 80% train, 20% test based on indices
             total_size = len(self.dataset)
             indices = list(range(total_size))
-            split_idx = int(0.8 * total_size)
+            
+            split_idx = int(self.split_ratio * total_size)
             
             if split == "train":
                 selected_indices = indices[:split_idx]

@@ -3,6 +3,7 @@ import wandb
 import argparse
 import torch
 from datetime import datetime
+from src.config import CHECKPOINTS_DATA_DIR
 
 def setup_wandb(config):
     """
@@ -20,7 +21,7 @@ def setup_wandb(config):
     
     return run
 
-def get_config(args=None):
+def get_config():
     """
     Get configuration dictionary from arguments
     """
@@ -35,7 +36,7 @@ def get_config(args=None):
         "feature_extractor_base_filters": 32,
         
         # Training parameters
-        "batch_size": 8,
+        "batch_size": 128,
         "num_epochs": 2,
         "learning_rate": 1e-4,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
@@ -45,50 +46,15 @@ def get_config(args=None):
         "target_length": 16000 * 4,
         "use_augmentation": False
     }
-    
-    if args:
-        # Override defaults with args
-        for key, value in vars(args).items():
-            config[key] = value
             
     return config
 
 if __name__ == "__main__":
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Train audio model on UrbanSound8K dataset")
-    
-    # Model parameters
-    parser.add_argument("--d_model", type=int, default=64, help="Model dimension")
-    parser.add_argument("--nhead", type=int, default=4, help="Number of attention heads")
-    parser.add_argument("--num_encoder_layers", type=int, default=2, help="Number of transformer encoder layers")
-    parser.add_argument("--dim_feedforward", type=int, default=256, help="Dimension of feedforward network")
-    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
-    
-    # Training parameters
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
-    parser.add_argument("--num_epochs", type=int, default=2, help="Number of epochs")
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--use_augmentation", action="store_true", help="Whether to use data augmentation")
-    
-    # Parse arguments
-    args = parser.parse_args()
-    
     # Get config from args
-    config = get_config(args)
+    config = get_config()
     
     # Example usage
     from torch.utils.data import DataLoader
-    import sys
-    import os
-    import signal
-    
-    # Set timeout handler to prevent hanging
-    def timeout_handler(signum, frame):
-        print("Timeout reached. Operation took too long.")
-        sys.exit(1)
-    
-    # Add parent directory to path
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from dataset import get_datasets
     
     # Initialize wandb
@@ -97,9 +63,6 @@ if __name__ == "__main__":
     # Create datasets with timeout protection for loading only
     print("Loading datasets...")
     try:
-        # Set 60 second timeout for dataset loading
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(60)
         
         train_dataset, test_dataset = get_datasets(
             sample_rate=config["sample_rate"],
@@ -107,10 +70,7 @@ if __name__ == "__main__":
             augment=config["use_augmentation"],
             max_length=None  # Use all available data
         )
-        
-        # Cancel the timeout alarm
-        signal.alarm(0)
-        
+
         print(f"Datasets loaded. Train: {len(train_dataset)}, Test: {len(test_dataset)}")
         
         # Create dataloaders
@@ -224,14 +184,6 @@ if __name__ == "__main__":
             prediction = classifier.predict(waveform)
             print(f"Prediction: Class {prediction['class_id']} with confidence {prediction['confidence']:.4f}")
             
-            # Save the model
-            import os
-            from pathlib import Path
-            
-            # Get root directory path
-            sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-            from config import CHECKPOINTS_DATA_DIR
-            
             # Create the directory if it doesn't exist
             CHECKPOINTS_DATA_DIR.mkdir(parents=True, exist_ok=True)
             
@@ -254,16 +206,10 @@ if __name__ == "__main__":
     
     except TimeoutError:
         print("Dataset loading timed out. The dataset might be temporarily unavailable.")
-        wandb.finish()
     except KeyboardInterrupt:
         print("\nProcess interrupted by user.")
-        wandb.finish()
     except Exception as e:
         print(f"Error: {e}")
-        wandb.finish()
     finally:
-        # Cancel any pending alarms
-        try:
-            signal.alarm(0)
-        except:
-            pass
+        print("Cleaning up...")
+        wandb.finish()

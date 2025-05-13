@@ -708,7 +708,7 @@ def main():
     parser.add_argument('--count', type=int, default=120, help='Number of runs to perform in the sweep')
     parser.add_argument('--project', type=str, default="mlx7-week-5-urbansound8k-classifier", 
                         help='wandb project name')
-    parser.add_argument('--model_type', type=str, choices=['raw', 'spectrogram', 'both'], default='ra',
+    parser.add_argument('--model_type', type=str, choices=['raw', 'spectrogram', 'both'], default='',
                         help='Model type to sweep: raw, spectrogram, or both')
     args = parser.parse_args()
     

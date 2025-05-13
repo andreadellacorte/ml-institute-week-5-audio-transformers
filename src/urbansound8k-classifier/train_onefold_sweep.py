@@ -14,7 +14,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.config import CHECKPOINTS_DATA_DIR
 from dataset import get_datasets
-from model import AudioClassifier, SpectrogramClassifier
+from model import AudioClassifier, SpectrogramClassifier, WhisperStyleAudioClassifier  # Added WhisperStyleAudioClassifier
 from torch.amp import autocast, GradScaler  # Updated import to use torch.amp instead of torch.cuda.amp
 
 # Set default seed for reproducibility
@@ -90,13 +90,29 @@ def train_model_with_config():
         grad_accum_steps = config.gradient_accumulation_steps
         
         # If we have a very large model or using spectrogram approach with large dimensions
-        if (config.d_model >= 512 and config.num_encoder_layers >= 6) or \
-           (config.model_type == 'spectrogram' and config.n_fft >= 512 and config.n_mels >= 128):
-            # Reduce batch size for larger models to prevent OOM
-            effective_batch_size = max(32, effective_batch_size // 2)
-            # Increase gradient accumulation steps to compensate
+        adjust_batch_size = False
+        if config.model_type in ['raw', 'spectrogram']:
+            if hasattr(config, 'd_model') and hasattr(config, 'num_encoder_layers') and \
+               (config.d_model >= 512 and config.num_encoder_layers >= 6):
+                adjust_batch_size = True
+            if config.model_type == 'spectrogram' and \
+               hasattr(config, 'n_fft') and hasattr(config, 'n_mels') and \
+               (config.n_fft >= 512 and config.n_mels >= 128):
+                adjust_batch_size = True
+        elif config.model_type == 'whisperstyle':
+            if hasattr(config, 'n_state') and hasattr(config, 'n_layer') and \
+               (config.n_state >= 512 and config.n_layer >= 6):
+                adjust_batch_size = True
+            # Optionally, add checks for n_fft and n_mels for whisperstyle if they can become very large
+            # For current whisperstyle sweep, n_fft=400, n_mels=80, so not triggering large spectrogram part
+            # if hasattr(config, 'n_fft') and hasattr(config, 'n_mels') and \
+            #    (config.n_fft >= 512 and config.n_mels >= 128):
+            #     adjust_batch_size = True
+                
+        if adjust_batch_size:
+            effective_batch_size = max(16, effective_batch_size // 2)  # Reduced min from 32 to 16 for safety
             grad_accum_steps = max(2, grad_accum_steps * 2)
-            print(f"Adjusted batch size to {effective_batch_size} with {grad_accum_steps} gradient accumulation steps")
+            print(f"Adjusted batch size for {config.model_type} model to {effective_batch_size} with {grad_accum_steps} gradient accumulation steps due to large model/feature parameters.")
         
         # Create dataloaders
         try:
@@ -174,7 +190,7 @@ def train_model_with_config():
                 feature_extractor_base_filters=config.feature_extractor_base_filters,
                 learning_rate=config.learning_rate  # This will be overridden below
             ).model
-        else:  # spectrogram
+        elif config.model_type == 'spectrogram':
             print("Creating spectrogram transformer model...")
             model = SpectrogramClassifier(
                 num_classes=10,
@@ -190,6 +206,23 @@ def train_model_with_config():
                 sample_rate=config.sample_rate,
                 learning_rate=config.learning_rate  # This will be overridden below
             ).model
+        elif config.model_type == 'whisperstyle':
+            print("Creating Whisper-style audio classifier model...")
+            model = WhisperStyleAudioClassifier(
+                num_classes=10,
+                sample_rate=config.sample_rate,
+                n_fft=config.n_fft,
+                hop_length=config.hop_length,
+                n_mels=config.n_mels,
+                n_state=config.n_state,
+                n_head=config.n_head,
+                n_layer=config.n_layer,
+                transformer_n_ctx=config.transformer_n_ctx,
+                dropout=config.dropout,
+                normalize_spectrogram=config.normalize_spectrogram
+            )
+        else:
+            raise ValueError(f"Unsupported model_type: {config.model_type}")
         
         # Move model to device
         model.to(device)
@@ -554,26 +587,25 @@ def create_sweep_config(model_type=None):
     Memory-optimized to prevent CUDA OOM errors.
     
     Args:
-        model_type: If specified, creates a config for only this model type ('raw' or 'spectrogram').
-                   If None, defaults to 'spectrogram' for this refined search.
+        model_type: If specified, creates a config for only this model type ('raw', 'spectrogram', or 'whisperstyle').
+                   If None, defaults to 'whisperstyle' for this refined search.
     
     Returns:
         Dictionary with sweep configuration
     """
-    # For this refined search, we are focusing on spectrogram
+    # For this refined search, we are focusing on whisperstyle
     if model_type is None or model_type == 'both':
-        model_type = 'spectrogram' 
+        model_type = 'whisperstyle'  # Set whisperstyle as default
     
     print(f"Creating sweep configuration for model_type: {model_type}")
     
     if model_type == 'raw':
-        # Keeping raw model config as before, in case it's explicitly requested
         common_params = {
             'd_model': {'values': [64, 128, 256]},
             'nhead': {'values': [4, 8]},
             'num_encoder_layers': {'values': [2, 4, 6]},
             'dim_feedforward': {'values': [256, 512, 1024]},
-            'dropout': {'values': [0.05, 0.1, 0.2]}, # Original dropout for raw
+            'dropout': {'values': [0.05, 0.1, 0.2]},
             'feature_extractor_base_filters': {'values': [8, 16, 32]},
             'dataset_cache_size': {'values': [512, 1024]},
             'batch_size': {'values': [32, 64, 128]},
@@ -582,7 +614,7 @@ def create_sweep_config(model_type=None):
             'gradient_accumulation_steps': {'values': [2, 4, 8]},
             'beta1': {'values': [0.9, 0.95, 0.99]},
             'beta2': {'values': [0.990, 0.995, 0.999]},
-            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-6, 'max': 1e-3}, # Original WD for raw
+            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-6, 'max': 1e-3},
             'eps': {'values': [1e-8, 1e-7, 1e-6]},
             'scheduler_type': {'values': ['reduce_on_plateau', 'cosine_annealing', 'one_cycle']},
             'scheduler_patience': {'values': [2, 3, 5]},
@@ -596,67 +628,89 @@ def create_sweep_config(model_type=None):
             'device': {'value': 'cuda'},
             'num_workers': {'value': 4},
             'seed': {'value': 42},
-            'use_mixed_precision': {'values': [True, False]} # Original mixed precision for raw
+            'use_mixed_precision': {'values': [True, False]}
         }
         model_specific_params = {'model_type': {'value': 'raw'}}
     elif model_type == 'spectrogram':
-        # Refined parameters for spectrogram model
         common_params = {
-            # Model architecture: Focus on slightly larger models than s6p21xlw, with stronger regularization
-            'd_model': {'values': [128, 256]}, # s6p21xlw used 128
-            'nhead': {'values': [4, 8]}, # s6p21xlw used 8
-            'num_encoder_layers': {'values': [2, 4]}, # s6p21xlw used 2
-            'dim_feedforward': {'values': [256, 512, 768]}, # s6p21xlw used 256
-            'dropout': {'values': [0.2, 0.3, 0.4]},  # Increased dropout for regularization
-            'feature_extractor_base_filters': {'values': [16, 32]}, # s6p21xlw used 16
-
-            # Training parameters
-            'batch_size': {'values': [64, 128]}, # s6p21xlw used 128
-            'learning_rate': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-3}, # Kept similar
-            'num_epochs': {'value': 20}, # Fixed
-            'gradient_accumulation_steps': {'values': [2, 4]}, # s6p21xlw used 4
-
-            # AdamW optimizer parameters - slightly narrowed
-            'beta1': {'values': [0.9, 0.95]}, # s6p21xlw used 0.99, common is 0.9
-            'beta2': {'values': [0.990, 0.999]}, # s6p21xlw used 0.999
-            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-2}, # Increased WD
-            'eps': {'values': [1e-8, 1e-7]}, # s6p21xlw used 1e-8
-
-            # Learning rate scheduler: Focus on cosine_annealing and one_cycle
+            'd_model': {'values': [128, 256]},
+            'nhead': {'values': [4, 8]},
+            'num_encoder_layers': {'values': [2, 4]},
+            'dim_feedforward': {'values': [256, 512, 768]},
+            'dropout': {'values': [0.2, 0.3, 0.4]},
+            'feature_extractor_base_filters': {'values': [16, 32]},
+            'batch_size': {'values': [64, 128]},
+            'learning_rate': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-3},
+            'num_epochs': {'value': 20},
+            'gradient_accumulation_steps': {'values': [2, 4]},
+            'beta1': {'values': [0.9, 0.95]},
+            'beta2': {'values': [0.990, 0.999]},
+            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-2},
+            'eps': {'values': [1e-8, 1e-7]},
             'scheduler_type': {'values': ['cosine_annealing', 'one_cycle']},
-            'scheduler_patience': {'values': [3, 5]}, # For ReduceLROnPlateau (if ever re-added)
-            'scheduler_factor': {'values': [0.1, 0.2]}, # For ReduceLROnPlateau
+            'scheduler_patience': {'values': [3, 5]},
+            'scheduler_factor': {'values': [0.1, 0.2]},
             'scheduler_min_lr': {'distribution': 'log_uniform_values', 'min': 1e-7, 'max': 1e-5},
-            'scheduler_t_max': {'values': [10, 15]}, # For CosineAnnealingLR (total epochs effectively)
-
-            # Other fixed or less critical parameters for this focused sweep
-            'early_stop_patience': {'value': 5}, # Keep early stopping
+            'scheduler_t_max': {'values': [10, 15]},
+            'early_stop_patience': {'value': 5},
             'sample_rate': {'value': 16000},
             'split_ratio': {'value': 0.9},
-            'num_augmentations': {'values': [1, 2, 4]}, # s6p21xlw used 2
-            'dataset_cache_size': {'values': [512, 1024]}, # s6p21xlw used 512
+            'num_augmentations': {'values': [1, 2, 4]},
+            'dataset_cache_size': {'values': [512, 1024]},
             'device': {'value': 'cuda'},
             'num_workers': {'value': 4},
             'seed': {'value': 42},
-            'use_mixed_precision': {'value': False} # Fixed to False based on s6p21xlw
+            'use_mixed_precision': {'value': False}
         }
         model_specific_params = {
             'model_type': {'value': 'spectrogram'},
-            'n_fft': {'values': [256, 400]}, # s6p21xlw used 400
-            'hop_length': {'values': [128, 160]}, # s6p21xlw used 128
-            'n_mels': {'values': [40, 64]}  # s6p21xlw used 40
+            'n_fft': {'values': [256, 400]},
+            'hop_length': {'values': [128, 160]},
+            'n_mels': {'values': [40, 64]}
         }
+    elif model_type == 'whisperstyle':
+        common_params = {
+            'batch_size': {'values': [32, 64]},
+            'learning_rate': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 5e-4},
+            'num_epochs': {'value': 25},
+            'gradient_accumulation_steps': {'values': [2, 4, 8]},
+            'beta1': {'values': [0.9]},
+            'beta2': {'values': [0.99, 0.999]},
+            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-3, 'max': 1e-1},
+            'eps': {'values': [1e-8, 1e-6]},
+            'scheduler_type': {'values': ['cosine_annealing', 'one_cycle']},
+            'scheduler_min_lr': {'distribution': 'log_uniform_values', 'min': 1e-7, 'max': 1e-6},
+            'scheduler_t_max': {'values': [15, 20]},
+            'n_mels': {'values': [80]},
+            'n_state': {'values': [384, 512]},
+            'n_head': {'values': [6, 8]},
+            'n_layer': {'values': [4, 6]},
+            'transformer_n_ctx': {'value': 200},
+            'dropout': {'values': [0.1, 0.2]},
+            'n_fft': {'values': [400]},
+            'hop_length': {'values': [160]},
+            'normalize_spectrogram': {'values': [True, False]},
+            'early_stop_patience': {'value': 7},
+            'sample_rate': {'value': 16000},
+            'split_ratio': {'value': 0.9},
+            'num_augmentations': {'values': [1, 2]},
+            'dataset_cache_size': {'values': [512, 1024]},
+            'device': {'value': 'cuda'},
+            'num_workers': {'value': 4},
+            'seed': {'value': 42},
+            'use_mixed_precision': {'value': True}
+        }
+        model_specific_params = {'model_type': {'value': 'whisperstyle'}}
     else:
         raise ValueError(f"Unsupported model_type for sweep: {model_type}")
     
-    # Create the full sweep configuration
     sweep_config = {
-        'method': 'bayes',  # Bayesian optimization
+        'method': 'bayes',
         'metric': {
             'name': 'best_eval_accuracy',
-            'goal': 'maximize'  # We want to maximize accuracy
+            'goal': 'maximize'
         },
-        'parameters': {**common_params, **model_specific_params}  # Merge common and specific parameters
+        'parameters': {**common_params, **model_specific_params}
     }
     
     return sweep_config
@@ -669,41 +723,44 @@ def main():
     parser.add_argument('--count', type=int, default=120, help='Number of runs to perform in the sweep')
     parser.add_argument('--project', type=str, default="mlx7-week-5-urbansound8k-classifier", 
                         help='wandb project name')
-    parser.add_argument('--model_type', type=str, choices=['raw', 'spectrogram', 'both'], default='spectrogram',
-                        help='Model type to sweep: raw, spectrogram, or both')
+    parser.add_argument('--model_type', type=str, choices=['raw', 'spectrogram', 'whisperstyle', 'both'], default='whisperstyle',
+                        help='Model type to sweep: raw, spectrogram, whisperstyle, or both (defaults to whisperstyle)')
     args = parser.parse_args()
     
     if args.model_type == 'both':
-        # Create two sweeps, one for each model type
         raw_sweep_config = create_sweep_config('raw')
         spec_sweep_config = create_sweep_config('spectrogram')
+        whisper_sweep_config = create_sweep_config('whisperstyle')
         
-        # Launch raw sweep
         raw_sweep_id = wandb.sweep(raw_sweep_config, project=f"{args.project}-raw")
         print(f"Created raw sweep with ID: {raw_sweep_id}")
         
-        # Launch spectrogram sweep
         spec_sweep_id = wandb.sweep(spec_sweep_config, project=f"{args.project}-spectrogram")
         print(f"Created spectrogram sweep with ID: {spec_sweep_id}")
+
+        whisper_sweep_id = wandb.sweep(whisper_sweep_config, project=f"{args.project}-whisperstyle")
+        print(f"Created whisperstyle sweep with ID: {whisper_sweep_id}")
         
-        # Distribute the runs between the two sweeps
-        raw_count = args.count // 2
-        spec_count = args.count - raw_count
+        count_per_sweep = args.count // 3
+        raw_count = count_per_sweep
+        spec_count = count_per_sweep
+        whisper_count = args.count - (raw_count + spec_count)
         
         print(f"Running {raw_count} raw model sweeps...")
         wandb.agent(raw_sweep_id, function=train_model_with_config, count=raw_count)
         
         print(f"Running {spec_count} spectrogram model sweeps...")
         wandb.agent(spec_sweep_id, function=train_model_with_config, count=spec_count)
+
+        print(f"Running {whisper_count} whisperstyle model sweeps...")
+        wandb.agent(whisper_sweep_id, function=train_model_with_config, count=whisper_count)
         
-        print(f"Sweep completed with {raw_count} raw model runs and {spec_count} spectrogram model runs")
+        print(f"Sweep completed with {raw_count} raw, {spec_count} spectrogram, and {whisper_count} whisperstyle model runs")
     else:
-        # Create a sweep for the specified model type
         sweep_config = create_sweep_config(args.model_type)
         sweep_id = wandb.sweep(sweep_config, project=f"{args.project}-{args.model_type}")
         print(f"Created {args.model_type} sweep with ID: {sweep_id}")
         
-        # Run the sweep
         wandb.agent(sweep_id, function=train_model_with_config, count=args.count)
         print(f"Sweep completed after {args.count} {args.model_type} model runs")
 

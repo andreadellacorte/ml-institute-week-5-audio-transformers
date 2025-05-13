@@ -200,6 +200,21 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+def sinusoids(length: int, channels: int, max_timescale: float = 10000.0) -> torch.Tensor:
+    """
+    Generates sinusoidal positional embeddings.
+    Shape: [1, length, channels]
+    """
+    assert channels % 2 == 0
+    position = torch.arange(length, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, channels, 2).float() * (-math.log(max_timescale) / channels))
+    
+    pe = torch.zeros(length, channels)
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    return pe.unsqueeze(0)
+
+
 class TransformerEncoderBlock(nn.Module):
     """
     A single transformer encoder block with multi-head self-attention
@@ -258,6 +273,47 @@ class TransformerEncoderBlock(nn.Module):
         ff_output = self.feed_forward(x_norm)
         x = x + self.dropout(ff_output)
         
+        return x
+
+
+class ResidualAttentionBlock(nn.Module):
+    """
+    A standard transformer encoder block with Post-LayerNorm.
+    Inspired by the block structure in models like Whisper.
+    """
+    def __init__(self, n_state: int, n_head: int, dropout: float = 0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(n_state, n_head, dropout=dropout, batch_first=True)
+        self.ln_1 = nn.LayerNorm(n_state)
+        
+        # Standard MLP size for transformers is 4 * n_state
+        self.mlp = nn.Sequential(
+            nn.Linear(n_state, 4 * n_state),
+            nn.GELU(),
+            nn.Linear(4 * n_state, n_state),
+            nn.Dropout(dropout)
+        )
+        self.ln_2 = nn.LayerNorm(n_state)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor [batch_size, seq_length, n_state]
+            mask: Optional mask for self-attention
+            
+        Returns:
+            Output tensor [batch_size, seq_length, n_state]
+        """
+        # Self-attention: x_res_attn = x + Dropout(Attn(LN(x)))
+        x_ln1 = self.ln_1(x)
+        attn_output, _ = self.attn(x_ln1, x_ln1, x_ln1, attn_mask=mask)
+        x = x + self.dropout(attn_output)
+        
+        # MLP: x_res_mlp = x_res_attn + Dropout(MLP(LN(x_res_attn)))
+        x_ln2 = self.ln_2(x)
+        mlp_output = self.mlp(x_ln2)
+        x = x + self.dropout(mlp_output)
         return x
 
 
@@ -419,6 +475,130 @@ class SpectrogramTransformerEncoder(nn.Module):
         
         # Classification
         logits = self.classifier(x)
+        
+        return logits
+
+
+class WhisperStyleAudioClassifier(nn.Module):
+    """
+    An audio classifier that takes raw audio, converts it to a Mel spectrogram,
+    and then processes it with a 1D CNN frontend followed by Transformer blocks,
+    inspired by the architecture of OpenAI's Whisper encoder.
+    """
+    def __init__(
+        self,
+        num_classes: int = 10,
+        sample_rate: int = 16000,
+        n_fft: int = 400,
+        hop_length: int = 160,
+        n_mels: int = 80,
+        n_state: int = 384,
+        n_head: int = 6,
+        n_layer: int = 4,
+        transformer_n_ctx: int = 200,
+        dropout: float = 0.1,
+        normalize_spectrogram: bool = True,
+        mel_f_min: float = 0.0,
+        mel_f_max: Optional[float] = None
+    ):
+        super().__init__()
+        
+        self.normalize_spectrogram = normalize_spectrogram
+        if mel_f_max is None:
+            mel_f_max = sample_rate / 2.0
+
+        self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            f_min=mel_f_min,
+            f_max=mel_f_max,
+            power=2.0,
+        )
+        self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB(top_db=80)
+
+        # Convolutional frontend (similar to Whisper encoder)
+        self.conv1 = nn.Conv1d(n_mels, n_state, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
+        
+        # Positional embedding for the transformer sequence length
+        self.register_buffer("positional_embedding", sinusoids(transformer_n_ctx, n_state))
+        
+        # Transformer blocks
+        self.blocks = nn.ModuleList(
+            [ResidualAttentionBlock(n_state, n_head, dropout=dropout) for _ in range(n_layer)]
+        )
+        self.ln_post = nn.LayerNorm(n_state)
+        
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(n_state, n_state), 
+            nn.LayerNorm(n_state),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(n_state, num_classes)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Raw audio waveform. Expected shapes:
+               - [batch_size, channels, time_samples]
+               - [batch_size, time_samples]
+               - [time_samples] (will be unsqueezed to [1, time_samples])
+            
+        Returns:
+            Class logits [batch_size, num_classes]
+        """
+        # 1. Prepare raw audio: ensure mono and [batch, time_samples]
+        if x.dim() == 3:
+            if x.size(1) > 1:
+                x_mono = torch.mean(x, dim=1)
+            else:
+                x_mono = x.squeeze(1)
+        elif x.dim() == 2:
+            x_mono = x
+        elif x.dim() == 1:
+            x_mono = x.unsqueeze(0)
+        else:
+            raise ValueError(f"Unsupported audio input shape: {x.shape}")
+
+        # 2. Convert raw audio to Mel Spectrogram
+        mel_spec = self.mel_spectrogram(x_mono)
+        mel_spec_db = self.amplitude_to_db(mel_spec)
+
+        if self.normalize_spectrogram:
+            mean = mel_spec_db.mean(dim=(1, 2), keepdim=True)
+            std = mel_spec_db.std(dim=(1, 2), keepdim=True) + 1e-5
+            mel_spec_db = (mel_spec_db - mean) / std
+            mel_spec_db = torch.nan_to_num(mel_spec_db, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # 3. Convolutional Frontend
+        x_conv = F.gelu(self.conv1(mel_spec_db))
+        x_conv = F.gelu(self.conv2(x_conv))
+        
+        x_conv = x_conv.permute(0, 2, 1)
+        
+        # 4. Add Positional Embedding
+        current_seq_len = x_conv.shape[1]
+        
+        if current_seq_len > self.positional_embedding.shape[1]:
+            x_conv = x_conv[:, :self.positional_embedding.shape[1], :]
+            current_seq_len = self.positional_embedding.shape[1]
+            
+        pos_emb_slice = self.positional_embedding[:, :current_seq_len, :]
+        x_tf = (x_conv + pos_emb_slice).to(x_conv.dtype)
+        
+        # 5. Transformer Blocks
+        for block in self.blocks:
+            x_tf = block(x_tf)
+            
+        x_tf = self.ln_post(x_tf)
+        
+        # 6. Global Average Pooling & Classification
+        x_pooled = torch.mean(x_tf, dim=1)
+        logits = self.classifier(x_pooled)
         
         return logits
 

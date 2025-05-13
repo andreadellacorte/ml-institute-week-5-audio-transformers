@@ -27,7 +27,6 @@ class UrbanSoundDataset(Dataset):
         split_ratio = 0.8,
         cache_size: int = 1024,  # Reduced default cache size to save memory
         prefetch_factor: int = 2,  # Controls how many samples to prefetch per worker
-        precision: torch.dtype = torch.float32  # Allow specifying precision (float32/float16)
     ):
         """
         Initialize the UrbanSound8K dataset.
@@ -43,7 +42,6 @@ class UrbanSoundDataset(Dataset):
             split_ratio: Ratio for train/test split if not using folds
             cache_size: Maximum number of samples to cache in memory
             prefetch_factor: Controls how many samples to prefetch per worker
-            precision: Tensor precision (torch.float32 or torch.float16)
         """
         self.sample_rate = sample_rate
         self.target_length = target_length
@@ -54,7 +52,6 @@ class UrbanSoundDataset(Dataset):
         self._cache_size = cache_size
         self._cache_keys = []  # LRU tracking
         self.prefetch_factor = prefetch_factor
-        self.precision = precision
         
         # Load dataset from Hugging Face
         self.dataset = load_dataset("danavery/urbansound8K", split="train")
@@ -133,9 +130,9 @@ class UrbanSoundDataset(Dataset):
         # Get the original item data
         item = self.dataset[original_idx]
         
-        # Load audio and convert to tensor
+        # Load audio and convert to tensor (always use float32)
         audio_data = item["audio"]["array"]
-        waveform = torch.tensor(audio_data, dtype=self.precision)  # Use specified precision
+        waveform = torch.tensor(audio_data, dtype=torch.float32)
         
         # Handle stereo to mono conversion if needed
         if len(waveform.shape) > 1 and waveform.shape[0] > 1:

@@ -62,10 +62,7 @@ def train_model_with_config():
         
         # Set random seed
         set_seed(config.seed)
-        
-        # Determine data precision based on whether we're using mixed precision
-        data_precision = torch.float16 if hasattr(config, 'use_mixed_precision') and config.use_mixed_precision else torch.float32
-        
+                
         # Create datasets with num_augmentations (replaces use_augmentation)
         print("Loading datasets...")
         train_dataset, test_dataset = get_datasets(
@@ -81,13 +78,8 @@ def train_model_with_config():
             train_dataset._cache_size = config.dataset_cache_size
             test_dataset._cache_size = config.dataset_cache_size
         
-        # Configure precision if available
-        if hasattr(train_dataset, 'precision'):
-            train_dataset.precision = data_precision
-            test_dataset.precision = data_precision
-        
         print(f"Datasets loaded. Train: {len(train_dataset)}, Test: {len(test_dataset)}")
-        print(f"Dataset cache size: {train_dataset._cache_size}, Precision: {data_precision}")
+        print(f"Dataset cache size: {train_dataset._cache_size}")
 
         # Adjust batch size based on available memory
         # Start with the configured batch size, but be ready to reduce it
@@ -163,8 +155,7 @@ def train_model_with_config():
             "effective_batch_size": effective_batch_size,
             "effective_gradient_accumulation_steps": grad_accum_steps,
             "effective_total_batch_size": effective_batch_size * grad_accum_steps,
-            "dataset_cache_size": train_dataset._cache_size,
-            "data_precision": str(data_precision)
+            "dataset_cache_size": train_dataset._cache_size
         })
         
         # Create model based on model_type

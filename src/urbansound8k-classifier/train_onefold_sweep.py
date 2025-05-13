@@ -539,140 +539,163 @@ def train_model_with_config():
         # Return metric to optimize (higher accuracy is better)
         return final_metrics['accuracy']
 
-def create_sweep_config():
+def create_sweep_config(model_type=None):
     """
     Create a configuration for the wandb sweep with Bayesian optimization.
     Memory-optimized to prevent CUDA OOM errors.
+    
+    Args:
+        model_type: If specified, creates a config for only this model type ('raw' or 'spectrogram').
+                   If None, randomly selects between both model types.
+    
+    Returns:
+        Dictionary with sweep configuration
     """
+    # If model_type is not specified, select it randomly to create a balanced set of runs
+    if model_type is None:
+        import random
+        model_type = random.choice(['raw', 'spectrogram'])
+    
+    print(f"Creating sweep configuration for model_type: {model_type}")
+    
+    # Common parameters for both model types
+    common_params = {
+        # Model architecture common parameters
+        'd_model': {
+            'values': [64, 128, 256]  # Reduced maximum model dimension 
+        },
+        'nhead': {
+            'values': [4, 8]  # Reduced maximum heads
+        },
+        'num_encoder_layers': {
+            'values': [2, 4, 6]  # Reduced maximum layers
+        },
+        'dim_feedforward': {
+            'values': [256, 512, 1024]  # Reduced maximum feedforward dimension
+        },
+        'dropout': {
+            'values': [0.05, 0.1, 0.2]  # Dropout rate
+        },
+        'feature_extractor_base_filters': {
+            'values': [8, 16, 32]  # Base filters for feature extractor
+        },
+        
+        # Memory optimization parameters
+        'use_mixed_precision': {
+            'values': [True, False]  # Whether to use mixed precision (fp16)
+        },
+        'dataset_cache_size': {
+            'values': [512, 1024]  # Number of samples to cache in dataset
+        },
+        
+        # Training parameters
+        'batch_size': {
+            'values': [32, 64, 128]  # Reduced batch sizes
+        },
+        'learning_rate': {
+            'distribution': 'log_uniform_values',
+            'min': 1e-5,
+            'max': 1e-3
+        },
+        'num_epochs': {
+            'value': 20  # Fixed to avoid wasting resources
+        },
+        'gradient_accumulation_steps': {
+            'values': [2, 4, 8]  # Increased accumulation steps to compensate for smaller batches
+        },
+        
+        # Adam optimizer parameters
+        'beta1': {
+            'values': [0.9, 0.95, 0.99]  # First momentum coefficient
+        },
+        'beta2': {
+            'values': [0.990, 0.995, 0.999]  # Second momentum coefficient
+        },
+        'weight_decay': {
+            'distribution': 'log_uniform_values',
+            'min': 1e-6,
+            'max': 1e-3
+        },
+        'eps': {
+            'values': [1e-8, 1e-7, 1e-6]  # Numerical stability term
+        },
+        
+        # Learning rate scheduler parameters
+        'scheduler_type': {
+            'values': ['reduce_on_plateau', 'cosine_annealing', 'one_cycle']  # Type of scheduler
+        },
+        'scheduler_patience': {
+            'values': [2, 3, 5]  # Patience for ReduceLROnPlateau
+        },
+        'scheduler_factor': {
+            'values': [0.1, 0.2, 0.5]  # Reduction factor for ReduceLROnPlateau
+        },
+        'scheduler_min_lr': {
+            'distribution': 'log_uniform_values',
+            'min': 1e-7,
+            'max': 1e-5
+        },
+        'scheduler_t_max': {
+            'values': [5, 10]  # For CosineAnnealingLR, cycles before reset
+        },
+        
+        # Early stopping parameters
+        'early_stop_patience': {
+            'value': 5  # Fixed to avoid excessive training
+        },
+        
+        # Dataset parameters
+        'sample_rate': {
+            'value': 16000  # Fixed for consistency
+        },
+        'split_ratio': {
+            'value': 0.9  # Train/test split ratio
+        },
+        'num_augmentations': {
+            'values': [0, 1, 2]  # Reduced maximum augmentations to save memory
+        },
+        
+        # System parameters
+        'device': {
+            'value': 'cuda'  # Fixed to use GPU
+        },
+        'num_workers': {
+            'value': 4  # Number of data loading workers
+        },
+        'seed': {
+            'value': 42  # Fixed for reproducibility
+        }
+    }
+    
+    # Model type specific configuration
+    if model_type == 'raw':
+        # Raw audio specific parameters
+        model_specific_params = {
+            'model_type': {'value': 'raw'}  # Fixed to raw audio model
+        }
+    else:  # spectrogram
+        # Spectrogram specific parameters
+        model_specific_params = {
+            'model_type': {'value': 'spectrogram'},  # Fixed to spectrogram model
+            'n_fft': {
+                'values': [256, 400]  # FFT size for spectrogram
+            },
+            'hop_length': {
+                'values': [128, 160]  # Hop length for spectrogram
+            },
+            'n_mels': {
+                'values': [64, 80]  # Number of mel bands
+            }
+        }
+    
+    # Create the full sweep configuration
     sweep_config = {
         'method': 'bayes',  # Bayesian optimization
         'metric': {
             'name': 'best_eval_accuracy',
             'goal': 'maximize'  # We want to maximize accuracy
         },
-        'parameters': {
-            # Model selection
-            'model_type': {
-                'values': ['raw', 'spectrogram']  # Choose between raw waveform or spectrogram model
-            },
-            
-            # Model architecture parameters - reduced sizes to prevent OOM
-            'd_model': {
-                'values': [64, 128, 256]  # Reduced maximum model dimension 
-            },
-            'nhead': {
-                'values': [4, 8]  # Reduced maximum heads
-            },
-            'num_encoder_layers': {
-                'values': [2, 4, 6]  # Reduced maximum layers
-            },
-            'dim_feedforward': {
-                'values': [256, 512, 1024]  # Reduced maximum feedforward dimension
-            },
-            'dropout': {
-                'values': [0.05, 0.1, 0.2]  # Dropout rate
-            },
-            'feature_extractor_base_filters': {
-                'values': [8, 16, 32]  # Base filters for feature extractor
-            },
-            
-            # Spectrogram-specific parameters - more efficient settings
-            'n_fft': {
-                'values': [256, 400]  # Reduced FFT size for spectrogram
-            },
-            'hop_length': {
-                'values': [128, 160]  # Hop length for spectrogram
-            },
-            'n_mels': {
-                'values': [64, 80]  # Reduced mel bands
-            },
-            
-            # Memory optimization parameters
-            'use_mixed_precision': {
-                'values': [True, False]  # Whether to use mixed precision (fp16)
-            },
-            'dataset_cache_size': {
-                'values': [512, 1024]  # Number of samples to cache in dataset
-            },
-            
-            # Training parameters - smaller batch sizes
-            'batch_size': {
-                'values': [32, 64, 128]  # Reduced batch sizes
-            },
-            'learning_rate': {
-                'distribution': 'log_uniform_values',
-                'min': 1e-5,
-                'max': 1e-3
-            },
-            'num_epochs': {
-                'value': 20  # Fixed to avoid wasting resources
-            },
-            'gradient_accumulation_steps': {
-                'values': [2, 4, 8]  # Increased accumulation steps to compensate for smaller batches
-            },
-            
-            # Adam optimizer parameters
-            'beta1': {
-                'values': [0.9, 0.95, 0.99]  # First momentum coefficient
-            },
-            'beta2': {
-                'values': [0.990, 0.995, 0.999]  # Second momentum coefficient
-            },
-            'weight_decay': {
-                'distribution': 'log_uniform_values',
-                'min': 1e-6,
-                'max': 1e-3
-            },
-            'eps': {
-                'values': [1e-8, 1e-7, 1e-6]  # Numerical stability term
-            },
-            
-            # Learning rate scheduler parameters
-            'scheduler_type': {
-                'values': ['reduce_on_plateau', 'cosine_annealing', 'one_cycle']  # Type of scheduler
-            },
-            'scheduler_patience': {
-                'values': [2, 3, 5]  # Patience for ReduceLROnPlateau
-            },
-            'scheduler_factor': {
-                'values': [0.1, 0.2, 0.5]  # Reduction factor for ReduceLROnPlateau
-            },
-            'scheduler_min_lr': {
-                'distribution': 'log_uniform_values',
-                'min': 1e-7,
-                'max': 1e-5
-            },
-            'scheduler_t_max': {
-                'values': [5, 10]  # For CosineAnnealingLR, cycles before reset
-            },
-            
-            # Early stopping parameters
-            'early_stop_patience': {
-                'value': 5  # Fixed to avoid excessive training
-            },
-            
-            # Dataset parameters
-            'sample_rate': {
-                'value': 16000  # Fixed for consistency
-            },
-            'split_ratio': {
-                'value': 0.9  # Train/test split ratio
-            },
-            'num_augmentations': {
-                'values': [0, 1, 2]  # Reduced maximum augmentations to save memory
-            },
-            
-            # System parameters
-            'device': {
-                'value': 'cuda'  # Fixed to use GPU
-            },
-            'num_workers': {
-                'value': 4  # Number of data loading workers
-            },
-            'seed': {
-                'value': 42  # Fixed for reproducibility
-            }
-        }
+        'parameters': {**common_params, **model_specific_params}  # Merge common and specific parameters
     }
     
     return sweep_config
@@ -685,16 +708,43 @@ def main():
     parser.add_argument('--count', type=int, default=120, help='Number of runs to perform in the sweep')
     parser.add_argument('--project', type=str, default="mlx7-week-5-urbansound8k-classifier", 
                         help='wandb project name')
+    parser.add_argument('--model_type', type=str, choices=['raw', 'spectrogram', 'both'], default='ra',
+                        help='Model type to sweep: raw, spectrogram, or both')
     args = parser.parse_args()
     
-    # Create the sweep
-    sweep_config = create_sweep_config()
-    sweep_id = wandb.sweep(sweep_config, project=args.project)
-    print(f"Created sweep with ID: {sweep_id}")
-    
-    # Run the sweep
-    wandb.agent(sweep_id, function=train_model_with_config, count=args.count)
-    print(f"Sweep completed after {args.count} runs")
+    if args.model_type == 'both':
+        # Create two sweeps, one for each model type
+        raw_sweep_config = create_sweep_config('raw')
+        spec_sweep_config = create_sweep_config('spectrogram')
+        
+        # Launch raw sweep
+        raw_sweep_id = wandb.sweep(raw_sweep_config, project=f"{args.project}-raw")
+        print(f"Created raw sweep with ID: {raw_sweep_id}")
+        
+        # Launch spectrogram sweep
+        spec_sweep_id = wandb.sweep(spec_sweep_config, project=f"{args.project}-spectrogram")
+        print(f"Created spectrogram sweep with ID: {spec_sweep_id}")
+        
+        # Distribute the runs between the two sweeps
+        raw_count = args.count // 2
+        spec_count = args.count - raw_count
+        
+        print(f"Running {raw_count} raw model sweeps...")
+        wandb.agent(raw_sweep_id, function=train_model_with_config, count=raw_count)
+        
+        print(f"Running {spec_count} spectrogram model sweeps...")
+        wandb.agent(spec_sweep_id, function=train_model_with_config, count=spec_count)
+        
+        print(f"Sweep completed with {raw_count} raw model runs and {spec_count} spectrogram model runs")
+    else:
+        # Create a sweep for the specified model type
+        sweep_config = create_sweep_config(args.model_type)
+        sweep_id = wandb.sweep(sweep_config, project=f"{args.project}-{args.model_type}")
+        print(f"Created {args.model_type} sweep with ID: {sweep_id}")
+        
+        # Run the sweep
+        wandb.agent(sweep_id, function=train_model_with_config, count=args.count)
+        print(f"Sweep completed after {args.count} {args.model_type} model runs")
 
 if __name__ == "__main__":
     main()

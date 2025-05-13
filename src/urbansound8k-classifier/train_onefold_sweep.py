@@ -581,188 +581,192 @@ def train_model_with_config():
         # Return metric to optimize (higher accuracy is better)
         return final_metrics['accuracy']
 
-def create_sweep_config(model_type=None):
+def create_sweep_config():
     """
-    Create a configuration for the wandb sweep with Bayesian optimization.
-    Memory-optimized to prevent CUDA OOM errors.
-    
-    Args:
-        model_type: If specified, creates a config for only this model type ('raw', 'spectrogram', or 'whisperstyle').
-                   If None, defaults to 'whisperstyle' for this refined search.
-    
-    Returns:
-        Dictionary with sweep configuration
+    Creates the W&B sweep configuration.
+    This sweep focuses on the impact of 'sample_rate' across different model types.
     """
-    # For this refined search, we are focusing on whisperstyle
-    if model_type is None or model_type == 'both':
-        model_type = 'whisperstyle'  # Set whisperstyle as default
-    
-    print(f"Creating sweep configuration for model_type: {model_type}")
-    
-    if model_type == 'raw':
-        common_params = {
-            'd_model': {'values': [64, 128, 256]},
-            'nhead': {'values': [4, 8]},
-            'num_encoder_layers': {'values': [2, 4, 6]},
-            'dim_feedforward': {'values': [256, 512, 1024]},
-            'dropout': {'values': [0.05, 0.1, 0.2]},
-            'feature_extractor_base_filters': {'values': [8, 16, 32]},
-            'dataset_cache_size': {'values': [512, 1024]},
-            'batch_size': {'values': [32, 64, 128]},
-            'learning_rate': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-3},
-            'num_epochs': {'value': 20},
-            'gradient_accumulation_steps': {'values': [2, 4, 8]},
-            'beta1': {'values': [0.9, 0.95, 0.99]},
-            'beta2': {'values': [0.990, 0.995, 0.999]},
-            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-6, 'max': 1e-3},
-            'eps': {'values': [1e-8, 1e-7, 1e-6]},
-            'scheduler_type': {'values': ['reduce_on_plateau', 'cosine_annealing', 'one_cycle']},
-            'scheduler_patience': {'values': [2, 3, 5]},
-            'scheduler_factor': {'values': [0.1, 0.2, 0.5]},
-            'scheduler_min_lr': {'distribution': 'log_uniform_values', 'min': 1e-7, 'max': 1e-5},
-            'scheduler_t_max': {'values': [5, 10]},
-            'early_stop_patience': {'value': 5},
-            'sample_rate': {'value': 16000},
-            'split_ratio': {'value': 0.9},
-            'num_augmentations': {'values': [0, 1, 2]},
-            'device': {'value': 'cuda'},
-            'num_workers': {'value': 4},
-            'seed': {'value': 42},
-            'use_mixed_precision': {'values': [True, False]}
-        }
-        model_specific_params = {'model_type': {'value': 'raw'}}
-    elif model_type == 'spectrogram':
-        common_params = {
-            'd_model': {'values': [128, 256]},
-            'nhead': {'values': [4, 8]},
-            'num_encoder_layers': {'values': [2, 4]},
-            'dim_feedforward': {'values': [256, 512, 768]},
-            'dropout': {'values': [0.2, 0.3, 0.4]},
-            'feature_extractor_base_filters': {'values': [16, 32]},
-            'batch_size': {'values': [64, 128]},
-            'learning_rate': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-3},
-            'num_epochs': {'value': 20},
-            'gradient_accumulation_steps': {'values': [2, 4]},
-            'beta1': {'values': [0.9, 0.95]},
-            'beta2': {'values': [0.990, 0.999]},
-            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-2},
-            'eps': {'values': [1e-8, 1e-7]},
-            'scheduler_type': {'values': ['cosine_annealing', 'one_cycle']},
-            'scheduler_patience': {'values': [3, 5]},
-            'scheduler_factor': {'values': [0.1, 0.2]},
-            'scheduler_min_lr': {'distribution': 'log_uniform_values', 'min': 1e-7, 'max': 1e-5},
-            'scheduler_t_max': {'values': [10, 15]},
-            'early_stop_patience': {'value': 5},
-            'sample_rate': {'value': 16000},
-            'split_ratio': {'value': 0.9},
-            'num_augmentations': {'values': [1, 2, 4]},
-            'dataset_cache_size': {'values': [512, 1024]},
-            'device': {'value': 'cuda'},
-            'num_workers': {'value': 4},
-            'seed': {'value': 42},
-            'use_mixed_precision': {'value': False}
-        }
-        model_specific_params = {
-            'model_type': {'value': 'spectrogram'},
-            'n_fft': {'values': [256, 400]},
-            'hop_length': {'values': [128, 160]},
-            'n_mels': {'values': [40, 64]}
-        }
-    elif model_type == 'whisperstyle':
-        common_params = {
-            'batch_size': {'values': [32, 64]},
-            'learning_rate': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 5e-4},
-            'num_epochs': {'value': 25},
-            'gradient_accumulation_steps': {'values': [2, 4, 8]},
-            'beta1': {'values': [0.9]},
-            'beta2': {'values': [0.99, 0.999]},
-            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-3, 'max': 1e-1},
-            'eps': {'values': [1e-8, 1e-6]},
-            'scheduler_type': {'values': ['cosine_annealing', 'one_cycle']},
-            'scheduler_min_lr': {'distribution': 'log_uniform_values', 'min': 1e-7, 'max': 1e-6},
-            'scheduler_t_max': {'values': [15, 20]},
-            'n_mels': {'values': [80]},
-            'n_state': {'values': [384, 512]},
-            'n_head': {'values': [6, 8]},
-            'n_layer': {'values': [4, 6]},
-            'transformer_n_ctx': {'value': 200},
-            'dropout': {'values': [0.1, 0.2]},
-            'n_fft': {'values': [400]},
-            'hop_length': {'values': [160]},
-            'normalize_spectrogram': {'values': [True, False]},
-            'early_stop_patience': {'value': 7},
-            'sample_rate': {'value': 16000},
-            'split_ratio': {'value': 0.9},
-            'num_augmentations': {'values': [1, 2]},
-            'dataset_cache_size': {'values': [512, 1024]},
-            'device': {'value': 'cuda'},
-            'num_workers': {'value': 4},
-            'seed': {'value': 42},
-            'use_mixed_precision': {'value': True}
-        }
-        model_specific_params = {'model_type': {'value': 'whisperstyle'}}
-    else:
-        raise ValueError(f"Unsupported model_type for sweep: {model_type}")
-    
     sweep_config = {
-        'method': 'bayes',
+        'method': 'grid',  # Use 'grid' to test all sample_rate combinations for each model
         'metric': {
             'name': 'best_eval_accuracy',
             'goal': 'maximize'
         },
-        'parameters': {**common_params, **model_specific_params}
+        'parameters': {
+            'model_type': {
+                'values': ["raw", "spectrogram", "whisperstyle"]
+            },
+            'sample_rate': {
+                'values': [8000, 16000, 22050, 32000] # Key variable for this sweep
+            },
+
+            # --- Fixed Architectural & Training Params to isolate sample_rate effect ---
+            'd_model': {
+                'value': 128
+            },
+            'nhead': {
+                'value': 4
+            },
+            'num_encoder_layers': {
+                'value': 4
+            },
+            'dim_feedforward': { # Typically d_model * 4
+                'value': 512
+            },
+            'dropout': {
+                'value': 0.1
+            },
+            'learning_rate': {
+                'value': 0.0001
+            },
+            'batch_size': { # Effective batch size per device before accumulation
+                'value': 32 # A reasonable starting point, can be adapted by the script
+            },
+            'gradient_accumulation_steps': {
+                'value': 1 # Start with 1, can be adapted by the script
+            },
+            'optimizer_type': {
+                'value': "adamw"
+            },
+            'beta1': {'value': 0.9},
+            'beta2': {'value': 0.999},
+            'eps': {'value': 1e-8},
+            'weight_decay': {
+                'value': 0.01
+            },
+            'scheduler_type': {
+                'value': "reduce_on_plateau"
+            },
+            'scheduler_factor': {'value': 0.2}, # Renamed from reduce_on_plateau_factor
+            'scheduler_patience': {'value': 3}, # Renamed from reduce_on_plateau_patience
+            'scheduler_min_lr': {'value': 1e-7},
+            'num_epochs': { # Max epochs; early stopping will likely trigger sooner
+                'value': 50
+            },
+            'early_stop_patience': {
+                'value': 10
+            },
+            'label_smoothing': {
+                'value': 0.1
+            },
+            'use_mixup': { # Disable augmentations to focus on sample_rate
+                'value': False
+            },
+            'mixup_alpha': { # Irrelevant if use_mixup is false
+                'value': 0.4
+            },
+            'split_ratio': { # For train/test split by get_datasets
+                'value': 0.8
+            },
+            'num_augmentations': { # Dataset-level augmentations (0 for none)
+                'value': 0
+            },
+            'num_workers': { # Dataloader workers
+                'value': 2
+            },
+            'seed': { # Random seed for reproducibility
+                'value': 42
+            },
+            'device': { # Device to use
+                'value': 'cuda' # Will fallback to 'cpu' if cuda not available
+            },
+            'dataset_cache_size': { # For UrbanSoundDataset caching
+                'value': 128
+            },
+            'n_fft': {
+                'value': 1024
+            },
+            'hop_length': {
+                'value': 256
+            },
+            'n_mels': {
+                'value': 128
+            },
+            'feature_extractor_base_filters': { # For raw_transformer's Conv1D stem
+                 'value': 16 # Example value, adjust as needed
+            },
+            'n_state': {'value': 128}, # Corresponds to d_model for Whisper
+            'n_head': {'value': 4},   # Corresponds to nhead for Whisper
+            'n_layer': {'value': 4},  # Corresponds to num_encoder_layers for Whisper
+            'transformer_n_ctx': {'value': 1024}, # Max sequence length for Whisper's transformer
+            'normalize_spectrogram': {'value': True},
+            'target_length_multiplier': { # Duration of audio clips in seconds (4s * sample_rate)
+                 'value': 4
+            },
+            'use_wandb_logging': { # This is implicit if wandb.init() is called
+                'value': True
+            }
+        }
     }
-    
     return sweep_config
 
 def main():
     """
-    Main function to create and run the sweep.
+    Main function to create and run the W&B sweep.
     """
-    parser = argparse.ArgumentParser(description="Run a hyperparameter sweep with wandb")
-    parser.add_argument('--count', type=int, default=120, help='Number of runs to perform in the sweep')
-    parser.add_argument('--project', type=str, default="mlx7-week-5-urbansound8k-classifier", 
-                        help='wandb project name')
-    parser.add_argument('--model_type', type=str, choices=['raw', 'spectrogram', 'whisperstyle', 'both'], default='whisperstyle',
-                        help='Model type to sweep: raw, spectrogram, whisperstyle, or both (defaults to whisperstyle)')
+    parser = argparse.ArgumentParser(description="Run a W&B sweep for UrbanSound8K classification.")
+    parser.add_argument(
+        '--count', 
+        type=int, 
+        default=None,  # Default to None to run all combinations in a grid sweep
+        help='Maximum number of runs for the agent. If None, runs all combinations for grid sweeps.'
+    )
+    parser.add_argument(
+        '--project', 
+        type=str, 
+        default="urbansound8k_sample_rate_analysis",
+        help='W&B project name for the sweep.'
+    )
+    parser.add_argument(
+        '--entity', 
+        type=str, 
+        default=None,  # Uses default W&B entity if None
+        help='W&B entity (username or organization).'
+    )
+    parser.add_argument(
+        '--initialize_sweep_only',
+        action='store_true',
+        help='If set, only initializes the sweep and prints the sweep ID, then exits.'
+    )
     args = parser.parse_args()
+
+    # Create the single, comprehensive sweep configuration
+    sweep_config = create_sweep_config()
+
+    # Initialize the sweep
+    print(f"Initializing sweep for project '{args.project}' under entity '{args.entity if args.entity else 'default'}'...")
+    sweep_id = wandb.sweep(sweep_config, entity=args.entity, project=args.project)
     
-    if args.model_type == 'both':
-        raw_sweep_config = create_sweep_config('raw')
-        spec_sweep_config = create_sweep_config('spectrogram')
-        whisper_sweep_config = create_sweep_config('whisperstyle')
-        
-        raw_sweep_id = wandb.sweep(raw_sweep_config, project=f"{args.project}-raw")
-        print(f"Created raw sweep with ID: {raw_sweep_id}")
-        
-        spec_sweep_id = wandb.sweep(spec_sweep_config, project=f"{args.project}-spectrogram")
-        print(f"Created spectrogram sweep with ID: {spec_sweep_id}")
+    print(f"\nSweep created successfully!")
+    print(f"  Sweep ID: {sweep_id}")
+    print(f"  Project: {args.project}")
+    if args.entity:
+        print(f"  Entity: {args.entity}")
+    
+    # Construct the sweep URL carefully
+    entity_str = args.entity if args.entity else '[YOUR_WANDB_ENTITY]' # Placeholder if no entity provided
+    sweep_url = f"https://wandb.ai/{entity_str}/{args.project}/sweeps/{sweep_id}"
+    print(f"  Sweep URL: {sweep_url}")
+    
+    print(f"\nTo run the agent, use the following command:")
+    agent_command_entity = args.entity if args.entity else '[YOUR_WANDB_ENTITY]'
+    print(f"  wandb agent {agent_command_entity}/{args.project}/{sweep_id}")
 
-        whisper_sweep_id = wandb.sweep(whisper_sweep_config, project=f"{args.project}-whisperstyle")
-        print(f"Created whisperstyle sweep with ID: {whisper_sweep_id}")
-        
-        count_per_sweep = args.count // 3
-        raw_count = count_per_sweep
-        spec_count = count_per_sweep
-        whisper_count = args.count - (raw_count + spec_count)
-        
-        print(f"Running {raw_count} raw model sweeps...")
-        wandb.agent(raw_sweep_id, function=train_model_with_config, count=raw_count)
-        
-        print(f"Running {spec_count} spectrogram model sweeps...")
-        wandb.agent(spec_sweep_id, function=train_model_with_config, count=spec_count)
+    if args.initialize_sweep_only:
+        print("\nSweep initialized. Exiting as per --initialize_sweep_only flag.")
+        return
 
-        print(f"Running {whisper_count} whisperstyle model sweeps...")
-        wandb.agent(whisper_sweep_id, function=train_model_with_config, count=whisper_count)
-        
-        print(f"Sweep completed with {raw_count} raw, {spec_count} spectrogram, and {whisper_count} whisperstyle model runs")
-    else:
-        sweep_config = create_sweep_config(args.model_type)
-        sweep_id = wandb.sweep(sweep_config, project=f"{args.project}-{args.model_type}")
-        print(f"Created {args.model_type} sweep with ID: {sweep_id}")
-        
+    # Start the sweep agent
+    print(f"\nStarting W&B agent for sweep ID: {sweep_id}...")
+    try:
         wandb.agent(sweep_id, function=train_model_with_config, count=args.count)
-        print(f"Sweep completed after {args.count} {args.model_type} model runs")
+        print(f"\nSweep agent finished processing runs.")
+    except KeyboardInterrupt:
+        print("\nSweep agent interrupted by user. Exiting.")
+    except Exception as e:
+        print(f"\nAn error occurred while running the sweep agent: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

@@ -13,11 +13,15 @@ class MaestroDataset(IterableDataset):
     A PyTorch IterableDataset for the MAESTRO dataset.
     It iterates over a metadata CSV, loads specified audio files directly
     from Hugging Face, downloads corresponding MIDI files, and processes them.
+    Can yield full sequences or fixed-size chunks.
     """
 
     def __init__(self, split="train", sample_rate=16000,
                  dataset_repo_id="ddPn08/maestro-v3.0.0",
-                 metadata_filename="maestro-v3.0.0.csv"):
+                 metadata_filename="maestro-v3.0.0.csv",
+                 chunk_duration_sec: float = None,  # Duration of audio chunks in seconds
+                 max_midi_tokens_per_chunk: int = None  # Max MIDI tokens for a chunk
+                 ):
         """
         Initialize the MAESTRO dataset.
 
@@ -27,6 +31,8 @@ class MaestroDataset(IterableDataset):
             sample_rate (int): Target sample rate for audio.
             dataset_repo_id (str): Hugging Face dataset repository ID.
             metadata_filename (str): Name of the metadata CSV file in the dataset repository.
+            chunk_duration_sec (float): Duration of audio chunks in seconds.
+            max_midi_tokens_per_chunk (int): Maximum number of MIDI tokens per chunk.
         """
         super().__init__()
         self.split = split
@@ -34,6 +40,19 @@ class MaestroDataset(IterableDataset):
         self.dataset_repo_id = dataset_repo_id
         self.metadata_filename = metadata_filename
         self.metadata_df = pd.DataFrame()
+
+        self.chunk_duration_sec = chunk_duration_sec
+        self.max_midi_tokens_per_chunk = max_midi_tokens_per_chunk
+        if self.chunk_duration_sec is not None:
+            self.chunk_samples = int(self.chunk_duration_sec * self.sample_rate)
+            if self.max_midi_tokens_per_chunk is None:
+                # Provide a default if chunking audio but not specifying max MIDI tokens
+                print("Warning: chunk_duration_sec is set, but max_midi_tokens_per_chunk is not. Defaulting to 512.")
+                self.max_midi_tokens_per_chunk = 512
+        else:
+            self.chunk_samples = None
+            if self.max_midi_tokens_per_chunk is not None:
+                print("Warning: max_midi_tokens_per_chunk is set, but chunk_duration_sec is not. max_midi_tokens_per_chunk will be ignored.")
 
         # Configure and initialize the REMI tokenizer
         tokenizer_config = TokenizerConfig(
@@ -124,37 +143,104 @@ class MaestroDataset(IterableDataset):
 
                 waveform = torch.tensor(audio_array, dtype=torch.float32)
                 if waveform.ndim == 1:
-                    waveform = waveform.unsqueeze(0)
+                    waveform = waveform.unsqueeze(0) # Ensure [1, num_samples]
 
-                midi_tokens = None
+                full_midi_score = None
                 if downloaded_midi_path and os.path.exists(downloaded_midi_path):
                     try:
-                        midi_score = Score(downloaded_midi_path)
-                        midi_tokens = self.tokenizer(midi_score)
-                    except Exception as e_tok:
-                        print(f"Error tokenizing MIDI {downloaded_midi_path} for row {index}: {e_tok}")
-                        continue # Skip if MIDI tokenization fails
+                        full_midi_score = Score(downloaded_midi_path)
+                    except Exception as e_score:
+                        print(f"Error loading MIDI Score {downloaded_midi_path} for row {index}: {e_score}")
+                        continue
                 else:
-                    print(f"Skipping tokenization for row {index} as MIDI path is invalid or file doesn't exist.")
-                    continue # Skip if no valid MIDI path
+                    print(f"Skipping row {index} as MIDI path is invalid or file doesn't exist.")
+                    continue
+                
+                # If not chunking, process as before
+                if self.chunk_samples is None:
+                    try:
+                        midi_tokens = self.tokenizer(full_midi_score)
+                        if not midi_tokens or not midi_tokens[0]: # Ensure tokens were produced
+                            print(f"Skipping row {index} due to empty tokenization for {downloaded_midi_path}")
+                            continue
+                    except Exception as e_tok:
+                        print(f"Error tokenizing full MIDI {downloaded_midi_path} for row {index}: {e_tok}")
+                        continue
+                    
+                    output_item = {
+                        "waveform": waveform,
+                        "sample_rate": self.sample_rate,
+                        "source_audio_url": loaded_audio_path,
+                        "downloaded_midi_path": downloaded_midi_path,
+                        "midi_tokens": midi_tokens
+                    }
+                    csv_metadata = row.to_dict()
+                    for key, value in csv_metadata.items():
+                        if key not in output_item:
+                            output_item[key] = value
+                        elif key == 'midi_filename' and downloaded_midi_path:
+                            output_item['original_midi_filename_from_csv'] = value
+                    yield output_item
 
-                output_item = {
-                    "waveform": waveform,
-                    "sample_rate": self.sample_rate,
-                    "source_audio_url": loaded_audio_path,
-                    "downloaded_midi_path": downloaded_midi_path,
-                    "midi_tokens": midi_tokens
-                }
+                else: # Implement chunking
+                    num_total_samples = waveform.shape[1]
+                    current_sample_offset = 0
+                    
+                    while current_sample_offset < num_total_samples:
+                        start_sample = current_sample_offset
+                        end_sample = min(current_sample_offset + self.chunk_samples, num_total_samples)
+                        
+                        # Ensure audio_chunk is not too short (e.g., less than 1 sec)
+                        min_chunk_samples = self.sample_rate // 2 # 0.5 second
+                        if (end_sample - start_sample) < min_chunk_samples and start_sample > 0 : # Avoid tiny trailing chunks unless it's the only chunk
+                             current_sample_offset = end_sample # Effectively skip tiny trailing chunk
+                             continue
 
-                csv_metadata = row.to_dict()
-                for key, value in csv_metadata.items():
-                    if key not in output_item:
-                        output_item[key] = value
-                    elif key == 'midi_filename' and downloaded_midi_path: # Ensure downloaded_midi_path is prioritized
-                        output_item['original_midi_filename_from_csv'] = value
+                        audio_chunk = waveform[:, start_sample:end_sample]
+                        
+                        start_time_sec = start_sample / self.sample_rate
+                        end_time_sec = end_sample / self.sample_rate
+                        
+                        # Slice the MIDI score for the current chunk
+                        # clip method arguments are (start, end, unit='s', clip_notes=True)
+                        try:
+                            chunk_midi_score = full_midi_score.clip(start_time_sec, end_time_sec, unit='s', clip_notes=True)
+                            # Tokenize the sliced MIDI score
+                            chunk_midi_tokens = self.tokenizer(chunk_midi_score)
+                        except Exception as e_midi_chunk:
+                            print(f"Error slicing/tokenizing MIDI chunk for {downloaded_midi_path} ({start_time_sec:.2f}s-{end_time_sec:.2f}s): {e_midi_chunk}")
+                            current_sample_offset = end_sample
+                            continue
 
-                yield output_item
+                        # Validate MIDI tokens
+                        if not chunk_midi_tokens or not chunk_midi_tokens[0]: # No MIDI events in this chunk
+                            current_sample_offset = end_sample
+                            continue # Skip chunks with no MIDI
 
+                        if len(chunk_midi_tokens[0]) > self.max_midi_tokens_per_chunk:
+                            current_sample_offset = end_sample
+                            continue # Skipping for now
+
+                        output_item = {
+                            "waveform": audio_chunk,
+                            "sample_rate": self.sample_rate,
+                            "source_audio_url": loaded_audio_path, # This refers to the original full audio
+                            "downloaded_midi_path": downloaded_midi_path, # Original full MIDI
+                            "midi_tokens": chunk_midi_tokens,
+                            "chunk_start_sec": start_time_sec,
+                            "chunk_end_sec": end_time_sec
+                        }
+                        csv_metadata = row.to_dict()
+                        for key, value in csv_metadata.items():
+                            if key not in output_item:
+                                output_item[key] = value
+                            elif key == 'midi_filename' and downloaded_midi_path:
+                                output_item['original_midi_filename_from_csv'] = value
+                        yield output_item
+                        current_sample_offset = end_sample
+            except StopIteration: # From next(iter(processed_ds['item'])) if dataset is empty
+                print(f"Warning: Could not load audio stream for {hf_audio_url}. It might be empty or inaccessible.")
+                continue
             except Exception as e:
                 print(f"Error processing audio file {csv_audio_path_in_repo} (URL: {hf_audio_url}): {e}")
                 continue
@@ -164,15 +250,25 @@ if __name__ == "__main__":
 
     TARGET_SAMPLE_RATE = 16000
     DATASET_SPLIT = "validation"
+    # --- Test with chunking ---
+    CHUNK_DURATION_SECONDS = 10.0 # 10 seconds audio chunks
+    MAX_MIDI_PER_CHUNK = 512    # Max 512 MIDI tokens for each chunk
 
     print(f"Initializing MaestroDataset:")
     print(f"  Split: {DATASET_SPLIT}")
     print(f"  Sample Rate: {TARGET_SAMPLE_RATE} Hz")
+    if CHUNK_DURATION_SECONDS is not None:
+        print(f"  Audio Chunk Duration: {CHUNK_DURATION_SECONDS}s")
+        print(f"  Max MIDI Tokens per Chunk: {MAX_MIDI_PER_CHUNK}")
+    else:
+        print("  Chunking: Disabled (processing full sequences)")
 
     try:
         maestro_dataset = MaestroDataset(
             split=DATASET_SPLIT,
-            sample_rate=TARGET_SAMPLE_RATE
+            sample_rate=TARGET_SAMPLE_RATE,
+            chunk_duration_sec=CHUNK_DURATION_SECONDS,
+            max_midi_tokens_per_chunk=MAX_MIDI_PER_CHUNK
         )
         dataset_iterator = iter(maestro_dataset)
 

@@ -2,17 +2,20 @@ import wandb
 import torch
 import argparse
 import os
+import sys
 import time
 from pathlib import Path
 from torch.utils.data import DataLoader
 from datetime import datetime
 from tqdm import tqdm  # Import tqdm for progress bars
 
+# Add the parent directory to the path to allow importing local modules
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
 from src.config import CHECKPOINTS_DATA_DIR
 from dataset import get_datasets
 from model import AudioClassifier, SpectrogramClassifier
-from torch.amp import autocast  # Updated import from torch.amp instead of torch.cuda.amp
-from torch.cuda.amp import GradScaler
+from torch.amp import autocast, GradScaler  # Updated import to use torch.amp instead of torch.cuda.amp
 
 # Set default seed for reproducibility
 def set_seed(seed=42):
@@ -200,8 +203,8 @@ def train_model_with_config():
             weight_decay=config.weight_decay
         )
         
-        # Create criterion (loss function)
-        criterion = torch.nn.CrossEntropyLoss()
+        # Create criterion (loss function) with label smoothing
+        criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
         
         # Create learning rate scheduler based on sweep config
         if config.scheduler_type == 'reduce_on_plateau':
@@ -282,7 +285,7 @@ def train_model_with_config():
         
         # Initialize gradient scaler for mixed precision training
         use_mixed_precision = (device.type == "cuda")
-        scaler = GradScaler(enabled=use_mixed_precision)
+        scaler = GradScaler(enabled=use_mixed_precision)  # Fix: remove incorrect device_type parameter
         
         # Count and log number of parameters
         num_params = count_parameters(classifier.model)
@@ -355,6 +358,12 @@ def train_model_with_config():
                     
                     # Only step optimizer after accumulating gradients
                     if (i + 1) % grad_accum_steps == 0:
+                        # Unscale gradients for gradient clipping
+                        scaler.unscale_(classifier.optimizer)
+                        
+                        # Add gradient clipping to prevent exploding gradients and NaN loss
+                        torch.nn.utils.clip_grad_norm_(classifier.model.parameters(), max_norm=1.0)
+                        
                         # Update weights with gradient scaling for mixed precision
                         scaler.step(classifier.optimizer)
                         scaler.update()
@@ -684,7 +693,7 @@ def create_sweep_config(model_type=None):
                 'values': [128, 160]  # Hop length for spectrogram
             },
             'n_mels': {
-                'values': [64, 80]  # Number of mel bands
+                'values': [40, 64]  # Reduced from previous 80 to avoid filterbank warning
             }
         }
     
@@ -708,7 +717,7 @@ def main():
     parser.add_argument('--count', type=int, default=120, help='Number of runs to perform in the sweep')
     parser.add_argument('--project', type=str, default="mlx7-week-5-urbansound8k-classifier", 
                         help='wandb project name')
-    parser.add_argument('--model_type', type=str, choices=['raw', 'spectrogram', 'both'], default='',
+    parser.add_argument('--model_type', type=str, choices=['raw', 'spectrogram', 'both'], default='spectrogram',
                         help='Model type to sweep: raw, spectrogram, or both')
     args = parser.parse_args()
     

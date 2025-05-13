@@ -63,7 +63,7 @@ class SpectrogramFeatureExtractor(nn.Module):
         self,
         n_fft: int = 400,
         hop_length: int = 160,
-        n_mels: int = 128,
+        n_mels: int = 64,  # Reduced from 128 or 80 to prevent filterbank issues
         base_filters: int = 32,
         sample_rate: int = 16000,
         normalize: bool = True
@@ -77,17 +77,19 @@ class SpectrogramFeatureExtractor(nn.Module):
         self.sample_rate = sample_rate
         self.normalize = normalize
         
-        # Mel spectrogram transform
+        # Mel spectrogram transform with adjusted parameters
         self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_fft=n_fft,
             hop_length=hop_length,
             n_mels=n_mels,
+            f_min=20.0,  # Add minimum frequency threshold
+            f_max=sample_rate/2 - 100,  # Add maximum frequency
             power=2.0,
         )
         
         # Amplitude to DB conversion
-        self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB()
+        self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB(top_db=80)
         
         # 2D convolutional layers for feature extraction
         self.conv_layers = nn.ModuleList()
@@ -134,6 +136,9 @@ class SpectrogramFeatureExtractor(nn.Module):
         # Apply Mel spectrogram transform
         x = self.mel_spectrogram(x)
         
+        # Add a small epsilon to avoid log(0)
+        x = x + 1e-10
+        
         # Convert to decibels
         x = self.amplitude_to_db(x)
         
@@ -141,13 +146,16 @@ class SpectrogramFeatureExtractor(nn.Module):
         if x.dim() == 3:
             x = x.unsqueeze(1)
         
-        # Apply normalization if enabled
+        # Apply normalization if enabled - improved implementation
         if self.normalize:
-            # Normalize each spectrogram independently
+            # More stable normalization with fixed epsilon
             mean = x.mean(dim=(2, 3), keepdim=True)
             std = x.std(dim=(2, 3), keepdim=True) + 1e-5
             x = (x - mean) / std
-            
+        
+        # Check for NaN values and replace with zeros
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        
         # Apply 2D convolutional layers
         for conv_layer in self.conv_layers:
             x = conv_layer(x)

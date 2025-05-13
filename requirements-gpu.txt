@@ -10,6 +10,7 @@ jupyterlab
 librosa
 loguru
 matplotlib
+miditok
 notebook
 nltk
 numpy<2

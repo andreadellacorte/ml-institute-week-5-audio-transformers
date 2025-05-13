@@ -5,12 +5,14 @@ import numpy as np
 import pandas as pd
 from huggingface_hub import hf_hub_download
 import os
+from miditok import REMI, TokenizerConfig
+from symusic import Score
 
 class MaestroDataset(IterableDataset):
     """
     A PyTorch IterableDataset for the MAESTRO dataset.
     It iterates over a metadata CSV, loads specified audio files directly
-    from Hugging Face, and processes them on the fly.
+    from Hugging Face, downloads corresponding MIDI files, and processes them.
     """
 
     def __init__(self, split="train", sample_rate=16000,
@@ -33,6 +35,15 @@ class MaestroDataset(IterableDataset):
         self.metadata_filename = metadata_filename
         self.metadata_df = pd.DataFrame()
 
+        # Configure and initialize the REMI tokenizer
+        tokenizer_config = TokenizerConfig(
+            num_velocities=16, 
+            use_chords=True, 
+            use_programs=False,  # MAESTRO is piano, program changes not essential
+            use_sustain_pedals=True, # Sustain pedals are important for piano
+        )
+        self.tokenizer = REMI(tokenizer_config)
+
         try:
             metadata_path = hf_hub_download(
                 repo_id=self.dataset_repo_id,
@@ -49,9 +60,9 @@ class MaestroDataset(IterableDataset):
                 print(f"Warning: 'split' column not found in {self.metadata_filename}. Using all entries.")
                 self.metadata_df = full_metadata_df
 
-            if 'audio_filename' not in self.metadata_df.columns:
-                print(f"Warning: 'audio_filename' column not found in the filtered metadata. Audio loading will fail.")
-                self.metadata_df = pd.DataFrame() # Ensure it's empty to prevent further errors
+            if 'audio_filename' not in self.metadata_df.columns or 'midi_filename' not in self.metadata_df.columns:
+                print(f"Warning: 'audio_filename' or 'midi_filename' column not found in the filtered metadata. Processing might fail.")
+                self.metadata_df = pd.DataFrame() # Ensure it's empty
 
         except Exception as e:
             print(f"Error downloading or parsing metadata CSV {self.metadata_filename}: {e}")
@@ -64,78 +75,95 @@ class MaestroDataset(IterableDataset):
 
         for index, row in self.metadata_df.iterrows():
             csv_audio_path_in_repo = row.get('audio_filename')
+            csv_midi_path_in_repo = row.get('midi_filename') # Get MIDI filename from CSV
 
             if not csv_audio_path_in_repo or not isinstance(csv_audio_path_in_repo, str):
                 print(f"Skipping row {index} due to missing or invalid 'audio_filename': {csv_audio_path_in_repo}")
                 continue
+            
+            if not csv_midi_path_in_repo or not isinstance(csv_midi_path_in_repo, str):
+                print(f"Skipping row {index} due to missing or invalid 'midi_filename': {csv_midi_path_in_repo}")
+                continue
 
             # Construct the direct Hugging Face URL for this audio file
-            # Ensure csv_audio_path_in_repo does not start with a slash if dataset_repo_id already implies root
             clean_csv_audio_path = csv_audio_path_in_repo.lstrip('/')
             hf_audio_url = f"https://huggingface.co/datasets/{self.dataset_repo_id}/resolve/main/{clean_csv_audio_path}"
 
+            downloaded_midi_path = None
+            try:
+                clean_csv_midi_path = csv_midi_path_in_repo.lstrip('/')
+                downloaded_midi_path = hf_hub_download(
+                    repo_id=self.dataset_repo_id,
+                    filename=clean_csv_midi_path,
+                    repo_type="dataset",
+                    # cache_dir can be specified if needed, e.g., "./midi_cache"
+                )
+            except Exception as e_midi:
+                print(f"Error downloading MIDI file {csv_midi_path_in_repo} for row {index}: {e_midi}")
+                # Decide whether to skip the item or proceed without MIDI
+                continue # For now, skip if MIDI download fails as it's the label
+
             try:
                 # Load the single audio file using 'audiofolder'
-                # The key for data_files (e.g., 'item') becomes the split name in the loaded dataset
                 single_file_ds = load_dataset(
                     "audiofolder",
                     data_files={"item": [hf_audio_url]},
-                    streaming=True
+                    streaming=True,
+                    # trust_remote_code=True # May be needed depending on HF datasets version and config
                 )
-
-                # Apply resampling and mono conversion
-                # The 'audiofolder' loader creates an 'audio' column by default.
                 processed_ds = single_file_ds.cast_column(
                     "audio",
                     Audio(sampling_rate=self.sample_rate, mono=True)
                 )
-
-                # Get the single item from this dataset stream
                 audio_stream_item = next(iter(processed_ds['item']))
-
                 audio_array = audio_stream_item['audio']['array']
-                loaded_audio_path = audio_stream_item['audio']['path'] # This will be the URL
+                loaded_audio_path = audio_stream_item['audio']['path']
 
-                # Optional: Path check for sanity
                 if os.path.basename(loaded_audio_path) != os.path.basename(csv_audio_path_in_repo):
                     print(f"Warning: Basename mismatch! CSV: {os.path.basename(csv_audio_path_in_repo)}, Loaded: {os.path.basename(loaded_audio_path)}")
 
                 waveform = torch.tensor(audio_array, dtype=torch.float32)
                 if waveform.ndim == 1:
-                    waveform = waveform.unsqueeze(0) # Ensure [1, num_samples]
+                    waveform = waveform.unsqueeze(0)
+
+                midi_tokens = None
+                if downloaded_midi_path and os.path.exists(downloaded_midi_path):
+                    try:
+                        midi_score = Score(downloaded_midi_path)
+                        midi_tokens = self.tokenizer(midi_score)
+                    except Exception as e_tok:
+                        print(f"Error tokenizing MIDI {downloaded_midi_path} for row {index}: {e_tok}")
+                        continue # Skip if MIDI tokenization fails
+                else:
+                    print(f"Skipping tokenization for row {index} as MIDI path is invalid or file doesn't exist.")
+                    continue # Skip if no valid MIDI path
 
                 output_item = {
                     "waveform": waveform,
                     "sample_rate": self.sample_rate,
-                    "source_audio_url": loaded_audio_path
+                    "source_audio_url": loaded_audio_path,
+                    "downloaded_midi_path": downloaded_midi_path,
+                    "midi_tokens": midi_tokens
                 }
-                # Add all metadata from the CSV row
-                output_item.update(row.to_dict())
 
-                if index == 0: # Print details for the first successfully processed item
-                    print("\n--- Details for the First Processed Item ---")
-                    print(f"CSV Index: {index}")
-                    print(f"Audio Filename (from CSV): {csv_audio_path_in_repo}")
-                    print(f"Loaded Audio URL: {loaded_audio_path}")
-                    print(f"Waveform shape: {waveform.shape}, dtype: {waveform.dtype}")
-                    print("Metadata from CSV:")
-                    for key, value in row.to_dict().items():
-                        print(f"  {key}: {value}")
-                    print("--------------------------------------------")
+                csv_metadata = row.to_dict()
+                for key, value in csv_metadata.items():
+                    if key not in output_item:
+                        output_item[key] = value
+                    elif key == 'midi_filename' and downloaded_midi_path: # Ensure downloaded_midi_path is prioritized
+                        output_item['original_midi_filename_from_csv'] = value
 
                 yield output_item
 
             except Exception as e:
-                print(f"Error processing file {csv_audio_path_in_repo} (URL: {hf_audio_url}): {e}")
-                # Optionally, yield a placeholder or skip
+                print(f"Error processing audio file {csv_audio_path_in_repo} (URL: {hf_audio_url}): {e}")
                 continue
 
 if __name__ == "__main__":
-    print("Starting MAESTRO dataset demonstration (CSV-driven)...")
+    print("Starting MAESTRO dataset demonstration (CSV-driven, with MIDI download)...")
 
-    # --- Configuration ---
     TARGET_SAMPLE_RATE = 16000
-    DATASET_SPLIT = "validation"  # Changed to validation for a potentially smaller set for quick testing
+    DATASET_SPLIT = "validation"
 
     print(f"Initializing MaestroDataset:")
     print(f"  Split: {DATASET_SPLIT}")
@@ -146,22 +174,39 @@ if __name__ == "__main__":
             split=DATASET_SPLIT,
             sample_rate=TARGET_SAMPLE_RATE
         )
-
         dataset_iterator = iter(maestro_dataset)
 
-        print("\nFetching the first sample from the dataset (ordered by CSV)...")
-        # Fetch a few samples to demonstrate
+        print("\nFetching a sample from the dataset (ordered by CSV)...")
         for i in range(2): # Try to get 2 samples
             try:
                 sample = next(dataset_iterator)
                 print(f"\n--- Sample {i+1} Information ---")
                 for key, value in sample.items():
                     if key == "waveform":
-                        print(f"  {key}: shape={value.shape}, dtype={value.dtype}, length={value.shape[1]/sample['sample_rate']:.2f}s")
-                    else:
+                        print(f"  {key}: shape={value.shape}, dtype={value.dtype}, length={value.shape[1]/sample.get('sample_rate', TARGET_SAMPLE_RATE):.2f}s")
+                    elif key == "downloaded_midi_path":
                         print(f"  {key}: {value}")
-
-                # Play the first sample
+                        if value and os.path.exists(value):
+                            print(f"    MIDI file size: {os.path.getsize(value)} bytes")
+                        elif value:
+                            print(f"    Warning: MIDI file path listed but not found at {value}")
+                    elif key == "midi_tokens":
+                        if value is not None:
+                            if isinstance(value, list) and len(value) > 0 and isinstance(value[0], list):
+                                print(f"  {key}: (List[List[int]]) {len(value)} track(s)")
+                                print(f"    First track tokens (sample): {value[0][:10]}...")
+                            elif isinstance(value, list):
+                                print(f"  {key}: (List[int]) {len(value)} tokens")
+                                print(f"    Tokens (sample): {value[:10]}...")
+                            else:
+                                print(f"  {key}: {type(value)} {str(value)[:60]}...")
+                        else:
+                            print(f"  {key}: None")
+                    else:
+                        str_value = str(value)
+                        if len(str_value) > 70: str_value = str_value[:67] + "..."
+                        print(f"  {key}: {str_value}")
+                
                 if i == 0:
                     print("\n--- Audio Playback (First Sample) ---")
                     waveform_to_play = sample["waveform"]
@@ -186,7 +231,7 @@ if __name__ == "__main__":
                 break
             except Exception as e_sample:
                 print(f"\nError fetching sample {i+1}: {e_sample}")
-                break # Stop if there's an error fetching a sample
+                break
 
     except Exception as e:
         print(f"\nAn unexpected error occurred during dataset initialization or iteration: {e}")

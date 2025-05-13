@@ -555,147 +555,99 @@ def create_sweep_config(model_type=None):
     
     Args:
         model_type: If specified, creates a config for only this model type ('raw' or 'spectrogram').
-                   If None, randomly selects between both model types.
+                   If None, defaults to 'spectrogram' for this refined search.
     
     Returns:
         Dictionary with sweep configuration
     """
-    # If model_type is not specified, select it randomly to create a balanced set of runs
-    if model_type is None:
-        import random
-        model_type = random.choice(['raw', 'spectrogram'])
+    # For this refined search, we are focusing on spectrogram
+    if model_type is None or model_type == 'both':
+        model_type = 'spectrogram' 
     
     print(f"Creating sweep configuration for model_type: {model_type}")
     
-    # Common parameters for both model types
-    common_params = {
-        # Model architecture common parameters
-        'd_model': {
-            'values': [64, 128, 256]  # Reduced maximum model dimension 
-        },
-        'nhead': {
-            'values': [4, 8]  # Reduced maximum heads
-        },
-        'num_encoder_layers': {
-            'values': [2, 4, 6]  # Reduced maximum layers
-        },
-        'dim_feedforward': {
-            'values': [256, 512, 1024]  # Reduced maximum feedforward dimension
-        },
-        'dropout': {
-            'values': [0.05, 0.1, 0.2]  # Dropout rate
-        },
-        'feature_extractor_base_filters': {
-            'values': [8, 16, 32]  # Base filters for feature extractor
-        },
-        
-        # Memory optimization parameters
-        'use_mixed_precision': {
-            'values': [True, False]  # Whether to use mixed precision (fp16)
-        },
-        'dataset_cache_size': {
-            'values': [512, 1024]  # Number of samples to cache in dataset
-        },
-        
-        # Training parameters
-        'batch_size': {
-            'values': [32, 64, 128]  # Reduced batch sizes
-        },
-        'learning_rate': {
-            'distribution': 'log_uniform_values',
-            'min': 1e-5,
-            'max': 1e-3
-        },
-        'num_epochs': {
-            'value': 20  # Fixed to avoid wasting resources
-        },
-        'gradient_accumulation_steps': {
-            'values': [2, 4, 8]  # Increased accumulation steps to compensate for smaller batches
-        },
-        
-        # Adam optimizer parameters
-        'beta1': {
-            'values': [0.9, 0.95, 0.99]  # First momentum coefficient
-        },
-        'beta2': {
-            'values': [0.990, 0.995, 0.999]  # Second momentum coefficient
-        },
-        'weight_decay': {
-            'distribution': 'log_uniform_values',
-            'min': 1e-6,
-            'max': 1e-3
-        },
-        'eps': {
-            'values': [1e-8, 1e-7, 1e-6]  # Numerical stability term
-        },
-        
-        # Learning rate scheduler parameters
-        'scheduler_type': {
-            'values': ['reduce_on_plateau', 'cosine_annealing', 'one_cycle']  # Type of scheduler
-        },
-        'scheduler_patience': {
-            'values': [2, 3, 5]  # Patience for ReduceLROnPlateau
-        },
-        'scheduler_factor': {
-            'values': [0.1, 0.2, 0.5]  # Reduction factor for ReduceLROnPlateau
-        },
-        'scheduler_min_lr': {
-            'distribution': 'log_uniform_values',
-            'min': 1e-7,
-            'max': 1e-5
-        },
-        'scheduler_t_max': {
-            'values': [5, 10]  # For CosineAnnealingLR, cycles before reset
-        },
-        
-        # Early stopping parameters
-        'early_stop_patience': {
-            'value': 5  # Fixed to avoid excessive training
-        },
-        
-        # Dataset parameters
-        'sample_rate': {
-            'value': 16000  # Fixed for consistency
-        },
-        'split_ratio': {
-            'value': 0.9  # Train/test split ratio
-        },
-        'num_augmentations': {
-            'values': [0, 1, 2]  # Reduced maximum augmentations to save memory
-        },
-        
-        # System parameters
-        'device': {
-            'value': 'cuda'  # Fixed to use GPU
-        },
-        'num_workers': {
-            'value': 4  # Number of data loading workers
-        },
-        'seed': {
-            'value': 42  # Fixed for reproducibility
-        }
-    }
-    
-    # Model type specific configuration
     if model_type == 'raw':
-        # Raw audio specific parameters
-        model_specific_params = {
-            'model_type': {'value': 'raw'}  # Fixed to raw audio model
+        # Keeping raw model config as before, in case it's explicitly requested
+        common_params = {
+            'd_model': {'values': [64, 128, 256]},
+            'nhead': {'values': [4, 8]},
+            'num_encoder_layers': {'values': [2, 4, 6]},
+            'dim_feedforward': {'values': [256, 512, 1024]},
+            'dropout': {'values': [0.05, 0.1, 0.2]}, # Original dropout for raw
+            'feature_extractor_base_filters': {'values': [8, 16, 32]},
+            'dataset_cache_size': {'values': [512, 1024]},
+            'batch_size': {'values': [32, 64, 128]},
+            'learning_rate': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-3},
+            'num_epochs': {'value': 20},
+            'gradient_accumulation_steps': {'values': [2, 4, 8]},
+            'beta1': {'values': [0.9, 0.95, 0.99]},
+            'beta2': {'values': [0.990, 0.995, 0.999]},
+            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-6, 'max': 1e-3}, # Original WD for raw
+            'eps': {'values': [1e-8, 1e-7, 1e-6]},
+            'scheduler_type': {'values': ['reduce_on_plateau', 'cosine_annealing', 'one_cycle']},
+            'scheduler_patience': {'values': [2, 3, 5]},
+            'scheduler_factor': {'values': [0.1, 0.2, 0.5]},
+            'scheduler_min_lr': {'distribution': 'log_uniform_values', 'min': 1e-7, 'max': 1e-5},
+            'scheduler_t_max': {'values': [5, 10]},
+            'early_stop_patience': {'value': 5},
+            'sample_rate': {'value': 16000},
+            'split_ratio': {'value': 0.9},
+            'num_augmentations': {'values': [0, 1, 2]},
+            'device': {'value': 'cuda'},
+            'num_workers': {'value': 4},
+            'seed': {'value': 42},
+            'use_mixed_precision': {'values': [True, False]} # Original mixed precision for raw
         }
-    else:  # spectrogram
-        # Spectrogram specific parameters
-        model_specific_params = {
-            'model_type': {'value': 'spectrogram'},  # Fixed to spectrogram model
-            'n_fft': {
-                'values': [256, 400]  # FFT size for spectrogram
-            },
-            'hop_length': {
-                'values': [128, 160]  # Hop length for spectrogram
-            },
-            'n_mels': {
-                'values': [40, 64]  # Reduced from previous 80 to avoid filterbank warning
-            }
+        model_specific_params = {'model_type': {'value': 'raw'}}
+    elif model_type == 'spectrogram':
+        # Refined parameters for spectrogram model
+        common_params = {
+            # Model architecture: Focus on slightly larger models than s6p21xlw, with stronger regularization
+            'd_model': {'values': [128, 256]}, # s6p21xlw used 128
+            'nhead': {'values': [4, 8]}, # s6p21xlw used 8
+            'num_encoder_layers': {'values': [2, 4]}, # s6p21xlw used 2
+            'dim_feedforward': {'values': [256, 512, 768]}, # s6p21xlw used 256
+            'dropout': {'values': [0.2, 0.3, 0.4]},  # Increased dropout for regularization
+            'feature_extractor_base_filters': {'values': [16, 32]}, # s6p21xlw used 16
+
+            # Training parameters
+            'batch_size': {'values': [64, 128]}, # s6p21xlw used 128
+            'learning_rate': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-3}, # Kept similar
+            'num_epochs': {'value': 20}, # Fixed
+            'gradient_accumulation_steps': {'values': [2, 4]}, # s6p21xlw used 4
+
+            # AdamW optimizer parameters - slightly narrowed
+            'beta1': {'values': [0.9, 0.95]}, # s6p21xlw used 0.99, common is 0.9
+            'beta2': {'values': [0.990, 0.999]}, # s6p21xlw used 0.999
+            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 1e-2}, # Increased WD
+            'eps': {'values': [1e-8, 1e-7]}, # s6p21xlw used 1e-8
+
+            # Learning rate scheduler: Focus on cosine_annealing and one_cycle
+            'scheduler_type': {'values': ['cosine_annealing', 'one_cycle']},
+            'scheduler_patience': {'values': [3, 5]}, # For ReduceLROnPlateau (if ever re-added)
+            'scheduler_factor': {'values': [0.1, 0.2]}, # For ReduceLROnPlateau
+            'scheduler_min_lr': {'distribution': 'log_uniform_values', 'min': 1e-7, 'max': 1e-5},
+            'scheduler_t_max': {'values': [10, 15]}, # For CosineAnnealingLR (total epochs effectively)
+
+            # Other fixed or less critical parameters for this focused sweep
+            'early_stop_patience': {'value': 5}, # Keep early stopping
+            'sample_rate': {'value': 16000},
+            'split_ratio': {'value': 0.9},
+            'num_augmentations': {'values': [1, 2, 4]}, # s6p21xlw used 2
+            'dataset_cache_size': {'values': [512, 1024]}, # s6p21xlw used 512
+            'device': {'value': 'cuda'},
+            'num_workers': {'value': 4},
+            'seed': {'value': 42},
+            'use_mixed_precision': {'value': False} # Fixed to False based on s6p21xlw
         }
+        model_specific_params = {
+            'model_type': {'value': 'spectrogram'},
+            'n_fft': {'values': [256, 400]}, # s6p21xlw used 400
+            'hop_length': {'values': [128, 160]}, # s6p21xlw used 128
+            'n_mels': {'values': [40, 64]}  # s6p21xlw used 40
+        }
+    else:
+        raise ValueError(f"Unsupported model_type for sweep: {model_type}")
     
     # Create the full sweep configuration
     sweep_config = {

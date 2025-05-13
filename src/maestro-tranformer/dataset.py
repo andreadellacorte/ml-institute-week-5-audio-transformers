@@ -11,42 +11,51 @@ from symusic import Score
 class MaestroDataset(IterableDataset):
     """
     A PyTorch IterableDataset for the MAESTRO dataset.
-    It iterates over a metadata CSV, loads specified audio files directly
-    from Hugging Face, downloads corresponding MIDI files, and processes them.
+    It loads data from the 'train' split of the source, then internally
+    splits it into training and validation/test sets.
+    Iterates over a metadata CSV, loads audio, downloads MIDI, and processes them.
     Can yield full sequences or fixed-size chunks.
+    Can be limited to a maximum number of items from its designated internal split.
     """
 
-    def __init__(self, split="train", sample_rate=16000,
+    def __init__(self, 
+                 mode: str = "train", # "train" or "validation" (or "test")
+                 train_split_percentage: float = 0.8, # Percentage of source 'train' data for internal training
+                 sample_rate=16000,
                  dataset_repo_id="ddPn08/maestro-v3.0.0",
                  metadata_filename="maestro-v3.0.0.csv",
-                 chunk_duration_sec: float = None,  # Duration of audio chunks in seconds
-                 max_midi_tokens_per_chunk: int = None  # Max MIDI tokens for a chunk
+                 chunk_duration_sec: float = None,
+                 max_midi_tokens_per_chunk: int = None,
+                 max_items: int = 10,
+                 random_seed_for_split: int = 42 # Seed for reproducible train/val split
                  ):
         """
         Initialize the MAESTRO dataset.
 
         Args:
-            split (str): Dataset split to use ("train", "validation", or "test").
-                         Filters the metadata CSV by this split.
+            mode (str): "train" or "validation". Determines which internal split to use.
+            train_split_percentage (float): Percentage of the data to allocate to the internal training set.
             sample_rate (int): Target sample rate for audio.
             dataset_repo_id (str): Hugging Face dataset repository ID.
             metadata_filename (str): Name of the metadata CSV file in the dataset repository.
             chunk_duration_sec (float): Duration of audio chunks in seconds.
             max_midi_tokens_per_chunk (int): Maximum number of MIDI tokens per chunk.
+            max_items (int, optional): Maximum number of items to yield from the selected internal split.
+            random_seed_for_split (int): Seed used for shuffling before creating the internal train/validation split.
         """
         super().__init__()
-        self.split = split
+        self.mode = mode
+        self.train_split_percentage = train_split_percentage
         self.sample_rate = sample_rate
         self.dataset_repo_id = dataset_repo_id
         self.metadata_filename = metadata_filename
-        self.metadata_df = pd.DataFrame()
+        self.internal_metadata_df = pd.DataFrame() # This will hold the metadata for the current mode
 
         self.chunk_duration_sec = chunk_duration_sec
         self.max_midi_tokens_per_chunk = max_midi_tokens_per_chunk
         if self.chunk_duration_sec is not None:
             self.chunk_samples = int(self.chunk_duration_sec * self.sample_rate)
             if self.max_midi_tokens_per_chunk is None:
-                # Provide a default if chunking audio but not specifying max MIDI tokens
                 print("Warning: chunk_duration_sec is set, but max_midi_tokens_per_chunk is not. Defaulting to 512.")
                 self.max_midi_tokens_per_chunk = 512
         else:
@@ -54,12 +63,12 @@ class MaestroDataset(IterableDataset):
             if self.max_midi_tokens_per_chunk is not None:
                 print("Warning: max_midi_tokens_per_chunk is set, but chunk_duration_sec is not. max_midi_tokens_per_chunk will be ignored.")
 
-        # Configure and initialize the REMI tokenizer
+        self.max_items = max_items
+        self.random_seed_for_split = random_seed_for_split
+        self._warned_no_sec_to_tick_files = set() # Initialize set for suppressing warnings
+
         tokenizer_config = TokenizerConfig(
-            num_velocities=16, 
-            use_chords=True, 
-            use_programs=False,  # MAESTRO is piano, program changes not essential
-            use_sustain_pedals=True, # Sustain pedals are important for piano
+            num_velocities=16, use_chords=True, use_programs=False, use_sustain_pedals=True
         )
         self.tokenizer = REMI(tokenizer_config)
 
@@ -69,30 +78,68 @@ class MaestroDataset(IterableDataset):
                 filename=self.metadata_filename,
                 repo_type="dataset"
             )
-            full_metadata_df = pd.read_csv(metadata_path)
+            source_full_metadata_df = pd.read_csv(metadata_path)
 
-            if 'split' in full_metadata_df.columns:
-                self.metadata_df = full_metadata_df[full_metadata_df['split'] == self.split].reset_index(drop=True)
-                if self.metadata_df.empty:
-                    print(f"Warning: No entries found for split '{self.split}' in {self.metadata_filename}.")
+            if 'split' in source_full_metadata_df.columns:
+                # Always use the 'train' split from the source for our internal splitting
+                source_train_df = source_full_metadata_df[source_full_metadata_df['split'] == 'train'].reset_index(drop=True)
+                if source_train_df.empty:
+                    print(f"Warning: No entries found for source split 'train' in {self.metadata_filename}.")
+                    return # internal_metadata_df remains empty
             else:
-                print(f"Warning: 'split' column not found in {self.metadata_filename}. Using all entries.")
-                self.metadata_df = full_metadata_df
+                print(f"Warning: 'split' column not found in {self.metadata_filename}. Using all entries as source for internal split.")
+                source_train_df = source_full_metadata_df
+            
+            if 'audio_filename' not in source_train_df.columns or 'midi_filename' not in source_train_df.columns:
+                print(f"Warning: 'audio_filename' or 'midi_filename' column not found in the source 'train' metadata. Processing might fail.")
+                return # internal_metadata_df remains empty
 
-            if 'audio_filename' not in self.metadata_df.columns or 'midi_filename' not in self.metadata_df.columns:
-                print(f"Warning: 'audio_filename' or 'midi_filename' column not found in the filtered metadata. Processing might fail.")
-                self.metadata_df = pd.DataFrame() # Ensure it's empty
+            # Shuffle the source_train_df for unbiased internal splitting
+            shuffled_source_train_df = source_train_df.sample(frac=1, random_state=self.random_seed_for_split).reset_index(drop=True)
+            
+            split_index = int(len(shuffled_source_train_df) * self.train_split_percentage)
+
+            if self.mode == "train":
+                self.internal_metadata_df = shuffled_source_train_df.iloc[:split_index].reset_index(drop=True)
+                print(f"Initialized for 'train' mode: {len(self.internal_metadata_df)} files.")
+            elif self.mode == "validation" or self.mode == "test":
+                self.internal_metadata_df = shuffled_source_train_df.iloc[split_index:].reset_index(drop=True)
+                print(f"Initialized for '{self.mode}' mode: {len(self.internal_metadata_df)} files.")
+            else:
+                raise ValueError(f"Invalid mode: {self.mode}. Choose 'train', 'validation', or 'test'.")
+            
+            if self.internal_metadata_df.empty:
+                 print(f"Warning: Internal metadata for mode '{self.mode}' is empty after splitting.")
+
 
         except Exception as e:
-            print(f"Error downloading or parsing metadata CSV {self.metadata_filename}: {e}")
-            # self.metadata_df remains an empty DataFrame
+            print(f"Error downloading or parsing metadata CSV {self.metadata_filename} for internal splitting: {e}")
+            # self.internal_metadata_df remains an empty DataFrame
+
+    def __len__(self):
+        """Return the effective length of the dataset for the current mode."""
+        if self.internal_metadata_df.empty:
+            return 0
+        
+        actual_metadata_length = len(self.internal_metadata_df)
+        
+        if self.max_items is not None and self.max_items >= 0:
+            return min(self.max_items, actual_metadata_length) if not self.chunk_samples else self.max_items if self.max_items < actual_metadata_length else actual_metadata_length
+
+        return actual_metadata_length
 
     def __iter__(self):
-        if self.metadata_df.empty:
-            print("Metadata is empty, cannot iterate.")
-            return iter([]) # Return an empty iterator
+        if self.internal_metadata_df.empty:
+            print(f"Internal metadata for mode '{self.mode}' is empty, cannot iterate.")
+            return iter([]) 
 
-        for index, row in self.metadata_df.iterrows():
+        items_yielded = 0 
+
+        for index, row in self.internal_metadata_df.iterrows(): # Iterate over the mode-specific dataframe
+            if self.max_items is not None and items_yielded >= self.max_items:
+                print(f"Reached max_items ({self.max_items}) for mode '{self.mode}', stopping iteration.")
+                break 
+
             csv_audio_path_in_repo = row.get('audio_filename')
             csv_midi_path_in_repo = row.get('midi_filename') # Get MIDI filename from CSV
 
@@ -115,20 +162,16 @@ class MaestroDataset(IterableDataset):
                     repo_id=self.dataset_repo_id,
                     filename=clean_csv_midi_path,
                     repo_type="dataset",
-                    # cache_dir can be specified if needed, e.g., "./midi_cache"
                 )
             except Exception as e_midi:
                 print(f"Error downloading MIDI file {csv_midi_path_in_repo} for row {index}: {e_midi}")
-                # Decide whether to skip the item or proceed without MIDI
-                continue # For now, skip if MIDI download fails as it's the label
+                continue
 
             try:
-                # Load the single audio file using 'audiofolder'
                 single_file_ds = load_dataset(
                     "audiofolder",
                     data_files={"item": [hf_audio_url]},
                     streaming=True,
-                    # trust_remote_code=True # May be needed depending on HF datasets version and config
                 )
                 processed_ds = single_file_ds.cast_column(
                     "audio",
@@ -156,7 +199,6 @@ class MaestroDataset(IterableDataset):
                     print(f"Skipping row {index} as MIDI path is invalid or file doesn't exist.")
                     continue
                 
-                # If not chunking, process as before
                 if self.chunk_samples is None:
                     try:
                         midi_tokens = self.tokenizer(full_midi_score)
@@ -181,8 +223,9 @@ class MaestroDataset(IterableDataset):
                         elif key == 'midi_filename' and downloaded_midi_path:
                             output_item['original_midi_filename_from_csv'] = value
                     yield output_item
+                    items_yielded += 1
 
-                else: # Implement chunking
+                else:
                     num_total_samples = waveform.shape[1]
                     current_sample_offset = 0
                     
@@ -190,10 +233,9 @@ class MaestroDataset(IterableDataset):
                         start_sample = current_sample_offset
                         end_sample = min(current_sample_offset + self.chunk_samples, num_total_samples)
                         
-                        # Ensure audio_chunk is not too short (e.g., less than 1 sec)
-                        min_chunk_samples = self.sample_rate // 2 # 0.5 second
-                        if (end_sample - start_sample) < min_chunk_samples and start_sample > 0 : # Avoid tiny trailing chunks unless it's the only chunk
-                             current_sample_offset = end_sample # Effectively skip tiny trailing chunk
+                        min_chunk_samples = self.sample_rate // 2
+                        if (end_sample - start_sample) < min_chunk_samples and start_sample > 0:
+                             current_sample_offset = end_sample
                              continue
 
                         audio_chunk = waveform[:, start_sample:end_sample]
@@ -201,31 +243,67 @@ class MaestroDataset(IterableDataset):
                         start_time_sec = start_sample / self.sample_rate
                         end_time_sec = end_sample / self.sample_rate
                         
-                        # Slice the MIDI score for the current chunk
-                        # clip method arguments are (start, end, unit='s', clip_notes=True)
                         try:
-                            chunk_midi_score = full_midi_score.clip(start_time_sec, end_time_sec, unit='s', clip_notes=True)
-                            # Tokenize the sliced MIDI score
+                            start_tick = -1
+                            end_tick = -1
+
+                            if hasattr(full_midi_score, 'sec_to_tick') and callable(full_midi_score.sec_to_tick):
+                                start_tick = full_midi_score.sec_to_tick(start_time_sec)
+                                end_tick = full_midi_score.sec_to_tick(end_time_sec)
+                            elif hasattr(full_midi_score, 'ticks_per_quarter') and hasattr(full_midi_score, 'tempos'):
+                                if downloaded_midi_path not in self._warned_no_sec_to_tick_files:
+                                    print(f"Warning: MIDI file {downloaded_midi_path} (type {type(full_midi_score)}) lacks 'sec_to_tick'. Attempting manual time conversion. (Further warnings for this file path will be suppressed for this dataset worker/instance)")
+                                    self._warned_no_sec_to_tick_files.add(downloaded_midi_path)
+                                
+                                tpq = full_midi_score.ticks_per_quarter
+                                if callable(tpq):
+                                    tpq = tpq()
+
+                                active_mspq = 500000.0 
+                                tempos_list = full_midi_score.tempos
+                                if callable(tempos_list):
+                                    tempos_list = tempos_list()
+
+                                if tempos_list:
+                                    sorted_tempos = sorted(tempos_list, key=lambda t: t.time)
+                                    initial_tempo_event = next((t for t in sorted_tempos if t.time <= 0), None)
+                                    if initial_tempo_event:
+                                        active_mspq = initial_tempo_event.mspq
+                                    elif sorted_tempos:
+                                        active_mspq = sorted_tempos[0].mspq
+                                
+                                if active_mspq <= 0:
+                                    print(f"Warning: Invalid mspq ({active_mspq}) for {downloaded_midi_path}. Using default 500000.0.")
+                                    active_mspq = 500000.0
+                                
+                                tps_approx = (float(tpq) * 1_000_000.0) / float(active_mspq)
+                                
+                                start_tick = int(start_time_sec * tps_approx)
+                                end_tick = int(end_time_sec * tps_approx)
+                            else:
+                                raise AttributeError(f"MIDI object for {downloaded_midi_path} (type {type(full_midi_score)}) lacks 'sec_to_tick' and also 'ticks_per_quarter'/'tempos' for fallback conversion.")
+
+                            chunk_midi_score = full_midi_score.clip(start_tick, end_tick, clip_end=True)
+                            
                             chunk_midi_tokens = self.tokenizer(chunk_midi_score)
                         except Exception as e_midi_chunk:
                             print(f"Error slicing/tokenizing MIDI chunk for {downloaded_midi_path} ({start_time_sec:.2f}s-{end_time_sec:.2f}s): {e_midi_chunk}")
                             current_sample_offset = end_sample
                             continue
 
-                        # Validate MIDI tokens
-                        if not chunk_midi_tokens or not chunk_midi_tokens[0]: # No MIDI events in this chunk
+                        if not chunk_midi_tokens or not chunk_midi_tokens[0]:
                             current_sample_offset = end_sample
-                            continue # Skip chunks with no MIDI
+                            continue
 
                         if len(chunk_midi_tokens[0]) > self.max_midi_tokens_per_chunk:
                             current_sample_offset = end_sample
-                            continue # Skipping for now
+                            continue
 
                         output_item = {
                             "waveform": audio_chunk,
                             "sample_rate": self.sample_rate,
-                            "source_audio_url": loaded_audio_path, # This refers to the original full audio
-                            "downloaded_midi_path": downloaded_midi_path, # Original full MIDI
+                            "source_audio_url": loaded_audio_path,
+                            "downloaded_midi_path": downloaded_midi_path,
                             "midi_tokens": chunk_midi_tokens,
                             "chunk_start_sec": start_time_sec,
                             "chunk_end_sec": end_time_sec
@@ -237,8 +315,12 @@ class MaestroDataset(IterableDataset):
                             elif key == 'midi_filename' and downloaded_midi_path:
                                 output_item['original_midi_filename_from_csv'] = value
                         yield output_item
+                        items_yielded += 1
+                        if self.max_items is not None and items_yielded >= self.max_items:
+                            print(f"Reached max_items ({self.max_items}) during chunking for mode '{self.mode}', stopping iteration.")
+                            return
                         current_sample_offset = end_sample
-            except StopIteration: # From next(iter(processed_ds['item'])) if dataset is empty
+            except StopIteration:
                 print(f"Warning: Could not load audio stream for {hf_audio_url}. It might be empty or inaccessible.")
                 continue
             except Exception as e:
@@ -250,9 +332,9 @@ if __name__ == "__main__":
 
     TARGET_SAMPLE_RATE = 16000
     DATASET_SPLIT = "validation"
-    # --- Test with chunking ---
-    CHUNK_DURATION_SECONDS = 10.0 # 10 seconds audio chunks
-    MAX_MIDI_PER_CHUNK = 512    # Max 512 MIDI tokens for each chunk
+    CHUNK_DURATION_SECONDS = 10.0
+    MAX_MIDI_PER_CHUNK = 512
+    MAX_DATASET_ITEMS = None
 
     print(f"Initializing MaestroDataset:")
     print(f"  Split: {DATASET_SPLIT}")
@@ -262,18 +344,24 @@ if __name__ == "__main__":
         print(f"  Max MIDI Tokens per Chunk: {MAX_MIDI_PER_CHUNK}")
     else:
         print("  Chunking: Disabled (processing full sequences)")
+    if MAX_DATASET_ITEMS is not None:
+        print(f"  Max Dataset Items: {MAX_DATASET_ITEMS}")
 
     try:
         maestro_dataset = MaestroDataset(
-            split=DATASET_SPLIT,
+            mode="train",
+            train_split_percentage=0.8,
             sample_rate=TARGET_SAMPLE_RATE,
             chunk_duration_sec=CHUNK_DURATION_SECONDS,
-            max_midi_tokens_per_chunk=MAX_MIDI_PER_CHUNK
+            max_midi_tokens_per_chunk=MAX_MIDI_PER_CHUNK,
+            max_items=MAX_DATASET_ITEMS
         )
         dataset_iterator = iter(maestro_dataset)
 
         print("\nFetching a sample from the dataset (ordered by CSV)...")
-        for i in range(2): # Try to get 2 samples
+        print(f"Reported dataset length: {len(maestro_dataset)}")
+
+        for i in range(2):
             try:
                 sample = next(dataset_iterator)
                 print(f"\n--- Sample {i+1} Information ---")

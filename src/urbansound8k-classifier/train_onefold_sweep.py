@@ -75,6 +75,13 @@ def train_model_with_config():
             max_length=None,  # Use all available data
             split_ratio=config.split_ratio
         )
+
+        # Print number of items per class in train and test datasets
+        from collections import Counter
+        train_labels = [item['label'] for item in train_dataset]
+        test_labels = [item['label'] for item in test_dataset]
+        print("Train class counts:", dict(Counter(train_labels)))
+        print("Test class counts:", dict(Counter(test_labels)))
         
         # Configure cache size if specified
         if hasattr(config, 'dataset_cache_size'):

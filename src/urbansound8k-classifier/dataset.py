@@ -62,17 +62,22 @@ class UrbanSoundDataset(Dataset):
         if fold is not None:
             self.dataset = self.dataset.filter(lambda x: x["fold"] == fold)
         else:
-            # Use standard split: 80% train, 20% test based on indices
-            total_size = len(self.dataset)
-            indices = list(range(total_size))
-            
-            split_idx = int(self.split_ratio * total_size)
-            
-            if split == "train":
-                selected_indices = indices[:split_idx]
-            else:  # test
-                selected_indices = indices[split_idx:]
-            
+            # Stratified split: for each class, split according to split_ratio
+            from collections import defaultdict
+            import numpy as np
+            class_indices = defaultdict(list)
+            for idx, class_id in enumerate(self.dataset["classID"]):
+                class_indices[class_id].append(idx)
+            selected_indices = []
+            for class_id, indices in class_indices.items():
+                n_total = len(indices)
+                n_train = int(self.split_ratio * n_total)
+                np.random.seed(42)  # For reproducibility
+                indices = np.random.permutation(indices)
+                if split == "train":
+                    selected_indices.extend(indices[:n_train])
+                else:
+                    selected_indices.extend(indices[n_train:])
             self.dataset = self.dataset.select(selected_indices)
         
         # Limit dataset size if specified

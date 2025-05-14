@@ -641,7 +641,7 @@ def create_sweep_config():
             'scheduler_patience': {'value': 3}, # Renamed from reduce_on_plateau_patience
             'scheduler_min_lr': {'value': 1e-7},
             'num_epochs': { # Max epochs; early stopping will likely trigger sooner
-                'value': 50
+                'value': 10
             },
             'early_stop_patience': {
                 'value': 10

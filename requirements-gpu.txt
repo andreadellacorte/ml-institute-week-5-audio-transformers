@@ -11,6 +11,7 @@ librosa
 loguru
 matplotlib
 miditok
+miditoolkit
 notebook
 nltk
 numpy<2

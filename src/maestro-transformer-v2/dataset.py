@@ -246,6 +246,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
 
 def create_maestro_dataloaders(
     batch_size: int = 32,
+    eval_batch_size: Optional[int] = None,
     max_seq_length: Optional[int] = None,
     train_dir: Union[str, Path] = TRAIN_DIR,
     eval_dir: Union[str, Path] = EVAL_DIR,
@@ -256,7 +257,8 @@ def create_maestro_dataloaders(
     Create DataLoaders for training and evaluation.
     
     Args:
-        batch_size: Batch size for DataLoaders
+        batch_size: Batch size for training DataLoader
+        eval_batch_size: Batch size for evaluation DataLoader (defaults to batch_size if None)
         max_seq_length: Maximum sequence length for MIDI tokens (None for no limit)
         train_dir: Directory containing training data
         eval_dir: Directory containing evaluation data
@@ -269,6 +271,10 @@ def create_maestro_dataloaders(
     # Set random seed for reproducibility
     torch.manual_seed(random_seed)
     random.seed(random_seed)
+    
+    # Use batch_size for evaluation if eval_batch_size is not specified
+    if eval_batch_size is None:
+        eval_batch_size = batch_size
     
     # Create datasets
     train_dataset = MaestroMIDISpectrogramDataset(
@@ -295,7 +301,7 @@ def create_maestro_dataloaders(
     
     eval_loader = DataLoader(
         eval_dataset,
-        batch_size=batch_size,
+        batch_size=eval_batch_size,
         shuffle=False,
         num_workers=num_workers,
         collate_fn=collate_fn,

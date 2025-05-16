@@ -63,7 +63,7 @@ class TrainingConfig:
     generation_temperature: float = 0.8
     top_k: int = 40
     top_p: float = 0.9
-    max_generation_length: int = 1024
+    max_generation_length: int = 50
     
     # Paths
     maestro_processed_dir: Path = PROCESSED_DATA_DIR / "ddPn08-maestro-v3.0.0"
@@ -191,7 +191,51 @@ def tokens_to_midi_file(
         
         # Convert tokens back to MIDI using the tokenizer
         print(f"  - Decoding {len(filtered_tokens)} tokens to MIDI")
-        midi_obj = tokenizer.decode(filtered_tokens)
+        
+        # The REMI tokenizer expects tokenized events, not raw ids
+        # Convert filtered token IDs back to a format the tokenizer can understand
+        # This tokenizer object might have token types in a specific order
+        token_ids = np.array(filtered_tokens).reshape(1, -1)
+        
+        # The tokenizer might need to associate the token IDs with their types
+        # Create a TokenSequence or similar object the tokenizer can work with
+        try:
+            # First try decode_token_ids if available
+            if hasattr(tokenizer, 'decode_token_ids'):
+                print("  - Using decode_token_ids method")
+                midi_obj = tokenizer.decode_token_ids(token_ids)
+            # Then try tokens_to_midi which is the correct method for miditok
+            elif hasattr(tokenizer, 'tokens_to_midi'):
+                print("  - Using tokens_to_midi method")
+                midi_obj = tokenizer.tokens_to_midi(token_ids)
+            else:
+                # Fallback to decode method
+                print("  - Falling back to decode method with converted tokens")
+                raise AttributeError("No direct token_id decoding method available")
+        except Exception as e:
+            print(f"  - Error with direct token decoding: {e}")
+            try:
+                # Try alternative method by first converting to token objects
+                # First get the reverse dictionary
+                vocab_map = {}
+                for token_type, token_dict in tokenizer.vocab.items():
+                    for token, tid in token_dict.items():
+                        vocab_map[tid] = (token_type, token)
+                
+                # Create token objects from ids
+                tokens_with_type = []
+                for token_id in filtered_tokens:
+                    if token_id in vocab_map:
+                        # Add token with its type
+                        token_type, token = vocab_map[token_id]
+                        tokens_with_type.append((token_type, token))
+                
+                # Use the tokenizer to decode these typed tokens
+                print("  - Using decode method with token types")
+                midi_obj = tokenizer.decode(tokens_with_type)
+            except Exception as e2:
+                print(f"  - Error with alternative decoding method: {e2}")
+                raise e
         
         # Save the MIDI file
         print(f"  - Writing MIDI to {output_path}")

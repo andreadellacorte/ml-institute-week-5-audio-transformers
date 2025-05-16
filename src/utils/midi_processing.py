@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from miditok import REMI
+from miditok import REMI, TokenizerConfig
 from miditoolkit.midi import parser as midi_parser
 import miditoolkit
 
@@ -240,9 +240,13 @@ def process_midi_file(midi_path, output_dir=None):
     chunk_b.dump(chunk_b_path)
     logger.info(f"Saved chunks to {chunk_a_path} and {chunk_b_path}")
     
-    # Initialize REMI tokenizer
-    logger.info("Initializing REMI tokenizer")
-    tokenizer = REMI()
+    # Create a TokenizerConfig with the desired settings
+    config = TokenizerConfig(
+        num_velocities=32, use_chords=True, use_programs=False, use_sustain_pedals=True
+    )
+
+    # Initialize the REMI tokenizer with the configuration
+    tokenizer = REMI(config)
     
     # Process each chunk
     for name, chunk, path in [
@@ -252,6 +256,9 @@ def process_midi_file(midi_path, output_dir=None):
         # Tokenize
         logger.info(f"Tokenizing chunk {name}")
         tokens = tokenizer(chunk)  # Tokenize
+        
+        # Debugging: Log the tokens before decoding
+        logger.info(f"Tokens going into decode: {tokens}")
         
         # Decode
         logger.info(f"Decoding chunk {name}")

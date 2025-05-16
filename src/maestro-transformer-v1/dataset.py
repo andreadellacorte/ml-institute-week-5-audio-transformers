@@ -68,7 +68,7 @@ class MaestroDataset(IterableDataset):
         self._warned_no_sec_to_tick_files = set() # Initialize set for suppressing warnings
 
         tokenizer_config = TokenizerConfig(
-            num_velocities=16, use_chords=True, use_programs=False, use_sustain_pedals=True
+            num_velocities=32, use_chords=True, use_programs=False, use_sustain_pedals=True
         )
         self.tokenizer = REMI(tokenizer_config)
 

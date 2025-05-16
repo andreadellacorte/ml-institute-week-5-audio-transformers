@@ -109,6 +109,8 @@ class MaestroMIDISpectrogramDataset(Dataset):
         
         # Debug - uncomment to check the structure
         # print(f"Sample {sample_id}, MIDI token type: {type(midi_tokens)}, shape: {np.shape(midi_tokens) if isinstance(midi_tokens, np.ndarray) else len(midi_tokens)}")
+
+        # print (midi_tokens)
         
         # Handle different token structures
         if isinstance(midi_tokens, dict):

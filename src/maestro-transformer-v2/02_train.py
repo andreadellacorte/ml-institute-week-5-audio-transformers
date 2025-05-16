@@ -1,4 +1,3 @@
-
 import os
 import torch
 import torch.nn as nn
@@ -15,6 +14,8 @@ import time
 import shutil
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Union
+from pydub import AudioSegment
+from midi2audio import FluidSynth
 
 # Local imports
 from model import SpectrogramToMIDITransformer, MIDIGenerationLoss
@@ -23,7 +24,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import PROCESSED_DATA_DIR, CHECKPOINTS_DATA_DIR
 import miditoolkit
-from miditok import REMI
+from miditok import REMI, TokenizerConfig
 
 
 # Configuration
@@ -32,17 +33,16 @@ class TrainingConfig:
     
     # Model parameters
     n_mels: int = 128
-    vocab_size: int = 282  # Matches REMI tokenizer vocabulary size
+    vocab_size: int = 298  # Matches REMI tokenizer vocabulary size
     d_model: int = 512
     nhead: int = 8
     num_decoder_layers: int = 6
     dim_feedforward: int = 2048
     dropout: float = 0.1
     max_seq_len: int = 1024
-    pad_token_id: int = 0
     
     # Training parameters
-    batch_size: int = 16
+    batch_size: int = 64
     eval_batch_size: int = 8
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
@@ -55,21 +55,21 @@ class TrainingConfig:
     max_train_examples: Optional[int] = None  # Set to None to use all examples
     
     # Evaluation parameters
-    eval_every: int = 1  # Evaluate every N steps
-    generate_midi_every: int = 1  # Generate MIDI every N evals
+    eval_every: int = 1000 # Evaluate every N steps
     num_eval_examples: int = 16  # Number of examples to use for evaluation
     
     # Generation parameters
-    generation_temperature: float = 0.8
+    generation_temperature: float = 0.0
     top_k: int = 40
     top_p: float = 0.9
-    max_generation_length: int = 50
+    max_generation_length: int = 600
     
     # Paths
     maestro_processed_dir: Path = PROCESSED_DATA_DIR / "ddPn08-maestro-v3.0.0"
     checkpoint_dir: Path = CHECKPOINTS_DATA_DIR / "maestro-transformer-v2"
     
     # Tokenizationres
+    pad_token_id: int = 0
     start_token: int = 1
     end_token: int = 2
     
@@ -130,14 +130,18 @@ def create_remi_tokenizer():
     """
     Create and return a REMI tokenizer instance.
     The tokenizer is configured to match the one used during data preprocessing.
-    
+
     Returns:
         REMI tokenizer instance
     """
-    # Initialize the REMI tokenizer with the same configuration as in data preprocessing
-    tokenizer = REMI()
-    return tokenizer
+    # Create a TokenizerConfig with the desired settings
+    config = TokenizerConfig(
+        num_velocities=32, use_chords=True, use_programs=False, use_sustain_pedals=True
+    )
 
+    # Initialize the REMI tokenizer with the configuration
+    tokenizer = REMI(config)
+    return tokenizer
 
 def tokens_to_midi_file(
     tokens: torch.Tensor,
@@ -165,82 +169,35 @@ def tokens_to_midi_file(
         # Make sure tokens is 1D (take first sample if batched)
         if len(tokens.shape) > 1:
             tokens = tokens[0]  # Take first sample in batch
-        
-        # Convert to numpy array
-        tokens = tokens.cpu().numpy()
-        
-        # Filter out special tokens (start, end, pad)
-        filtered_tokens = []
-        for token in tokens:
-            if token != start_token_id and token != end_token_id and token != pad_token_id:
-                filtered_tokens.append(token)
-        
+
         # Debug info
         print(f"  - Original token count: {len(tokens)}")
-        print(f"  - Filtered token count: {len(filtered_tokens)}")
-        
-        # Check if we have any tokens left
-        if not filtered_tokens:
-            print(f"  - Warning: No valid tokens remaining after filtering special tokens")
-            # Create an empty MIDI file as fallback
-            print(f"  - Creating empty MIDI file at {output_path}")
+        print(f"  - Tokens before filtering: {tokens}")
+
+        # Convert tokens to a list of integers
+        token_ids = tokens.tolist()
+
+        # Debugging: Log the converted token IDs
+        print(f"  - Converted token IDs: {token_ids}")
+
+        try:
+            # Decode the token IDs to MIDI
+            midi_obj = tokenizer.decode([token_ids])
+        except Exception as e:
+            print(f"  - Error during decoding: {e}")
+            print("  - Debugging token IDs causing the issue:")
+            for idx, token in enumerate(token_ids):
+                print(f"    - Token {idx}: {token}")
+            midi_obj = None
+
+        # Handle decoding failure
+        if midi_obj is None:
+            print("  - Warning: Decoded MIDI object is None. Creating an empty MIDI file.")
             midi_obj = miditoolkit.MidiFile()
             midi_obj.instruments.append(miditoolkit.Instrument(program=0, is_drum=False, name="Empty"))
-            midi_obj.dump(output_path)
-            return
-        
-        # Convert tokens back to MIDI using the tokenizer
-        print(f"  - Decoding {len(filtered_tokens)} tokens to MIDI")
-        
-        # The REMI tokenizer expects tokenized events, not raw ids
-        # Convert filtered token IDs back to a format the tokenizer can understand
-        # This tokenizer object might have token types in a specific order
-        token_ids = np.array(filtered_tokens).reshape(1, -1)
-        
-        # The tokenizer might need to associate the token IDs with their types
-        # Create a TokenSequence or similar object the tokenizer can work with
-        try:
-            # First try decode_token_ids if available
-            if hasattr(tokenizer, 'decode_token_ids'):
-                print("  - Using decode_token_ids method")
-                midi_obj = tokenizer.decode_token_ids(token_ids)
-            # Then try tokens_to_midi which is the correct method for miditok
-            elif hasattr(tokenizer, 'tokens_to_midi'):
-                print("  - Using tokens_to_midi method")
-                midi_obj = tokenizer.tokens_to_midi(token_ids)
-            else:
-                # Fallback to decode method
-                print("  - Falling back to decode method with converted tokens")
-                raise AttributeError("No direct token_id decoding method available")
-        except Exception as e:
-            print(f"  - Error with direct token decoding: {e}")
-            try:
-                # Try alternative method by first converting to token objects
-                # First get the reverse dictionary
-                vocab_map = {}
-                for token_type, token_dict in tokenizer.vocab.items():
-                    for token, tid in token_dict.items():
-                        vocab_map[tid] = (token_type, token)
-                
-                # Create token objects from ids
-                tokens_with_type = []
-                for token_id in filtered_tokens:
-                    if token_id in vocab_map:
-                        # Add token with its type
-                        token_type, token = vocab_map[token_id]
-                        tokens_with_type.append((token_type, token))
-                
-                # Use the tokenizer to decode these typed tokens
-                print("  - Using decode method with token types")
-                midi_obj = tokenizer.decode(tokens_with_type)
-            except Exception as e2:
-                print(f"  - Error with alternative decoding method: {e2}")
-                raise e
-        
-        # Save the MIDI file
-        print(f"  - Writing MIDI to {output_path}")
-        midi_obj.dump(output_path)
-        
+
+        midi_obj.dump_midi(output_path)
+
         # Verify file was created
         if os.path.exists(output_path):
             file_size = os.path.getsize(output_path)
@@ -360,22 +317,10 @@ def train_one_epoch(
         # Evaluate model periodically
         if global_step % config.eval_every == 0:
             eval_loss = evaluate(model, eval_loader, criterion, device, config, global_step)
+            
             wandb.log({"eval/loss": eval_loss}, step=global_step)
-
-            run_name = wandb.run.name
             
-            # Save checkpoint
-            checkpoint_dir = config.checkpoint_dir / run_name
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)  # Create directory if it doesn't exist
-            checkpoint_path = checkpoint_dir / f"step_{global_step}.pt"
-            save_checkpoint(model, optimizer, epoch, global_step, eval_loss, str(checkpoint_path))
-            
-            # Log best checkpoint to wandb
-            wandb.save(str(checkpoint_path))
-            
-            # Generate MIDI examples for visualization
-            if global_step % config.generate_midi_every == 0:
-                generate_and_save_midi_examples(model, eval_loader, device, config, global_step)
+            generate_and_save_midi_examples(model, eval_loader, device, config, global_step)
             
             # Switch back to training mode
             model.train()
@@ -472,40 +417,48 @@ def generate_and_save_midi_examples(
             top_p=config.top_p
         )
         generated_tokens = generated_outputs["tokens"]
-    
-    # Save original and generated MIDI files
+
+    # Add detailed logging for file copying and MIDI creation
     for i, (sample_id, orig_token, gen_token) in enumerate(zip(sample_ids, original_tokens, generated_tokens)):
-        # Get paths for the files
         orig_path = midi_dir / f"{sample_id}_original.midi"
         gen_path = midi_dir / f"{sample_id}_generated.midi"
-        
-        # Save the original MIDI file from the tokenized version
+
+        # Debugging: Log paths
+        print(f"Processing sample {sample_id}")
+        print(f"  - Original MIDI path: {orig_path}")
+        print(f"  - Generated MIDI path: {gen_path}")
+
+        # Attempt to copy original MIDI file
         original_midi_path = config.maestro_processed_dir / "eval" / f"{sample_id}.midi"
-        if original_midi_path.exists():
-            shutil.copy(original_midi_path, orig_path)
-        else:
+        if not original_midi_path.exists():
             original_midi_path = config.maestro_processed_dir / "train" / f"{sample_id}.midi"
-            if original_midi_path.exists():
+
+        if original_midi_path.exists():
+            try:
                 shutil.copy(original_midi_path, orig_path)
-            else:
-                # If the original MIDI file doesn't exist, convert tokens to MIDI
-                try:
-                    tokens_to_midi_file(
-                        tokens=orig_token,
-                        tokenizer=tokenizer,
-                        output_path=str(orig_path),
-                        start_token_id=config.start_token,
-                        end_token_id=config.end_token,
-                        pad_token_id=config.pad_token_id
-                    )
-                except Exception as e:
-                    print(f"Error creating original MIDI file: {e}")
-        
-        # Convert generated tokens to MIDI
+                print(f"Copied original MIDI file from {original_midi_path} to {orig_path}")
+            except Exception as e:
+                print(f"Error copying original MIDI file: {e}")
+        else:
+            print(f"Warning: Source original MIDI file not found at {original_midi_path}")
+
+        # Attempt to create original MIDI file if not copied
+        if not orig_path.exists():
+            try:
+                tokens_to_midi_file(
+                    tokens=orig_token,
+                    tokenizer=tokenizer,
+                    output_path=str(orig_path),
+                    start_token_id=config.start_token,
+                    end_token_id=config.end_token,
+                    pad_token_id=config.pad_token_id
+                )
+                print(f"Created original MIDI file at {orig_path}")
+            except Exception as e:
+                print(f"Error creating original MIDI file: {e}")
+
+        # Attempt to create generated MIDI file
         try:
-            print(f"Generating MIDI for sample {sample_id}...")
-            
-            print(f"  - Saving to: {gen_path}")
             tokens_to_midi_file(
                 tokens=gen_token,
                 tokenizer=tokenizer,
@@ -514,23 +467,9 @@ def generate_and_save_midi_examples(
                 end_token_id=config.end_token,
                 pad_token_id=config.pad_token_id
             )
-            
-            # Verify file was created
-            if not os.path.exists(str(gen_path)):
-                print(f"  - Warning: File not found at {gen_path} after save attempt")
-                
-            # Log these MIDI files to wandb
-            wandb.log({
-                f"midi_examples/original_{i}": wandb.Audio(str(orig_path), sample_rate=44100, caption=f"Original {sample_id}"),
-                f"midi_examples/generated_{i}": wandb.Audio(str(gen_path), sample_rate=44100, caption=f"Generated {sample_id}")
-            }, step=global_step)
-            
-            print(f"  - Successfully saved MIDI file for sample {sample_id}")
-            
+            print(f"Created generated MIDI file at {gen_path}")
         except Exception as e:
-            print(f"Error saving generated MIDI file: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error creating generated MIDI file: {e}")
     
     # Also log some token sequences as text (for easy inspection)
     for i, (sample_id, gen_token) in enumerate(zip(sample_ids[:2], generated_tokens[:2])):
@@ -547,7 +486,6 @@ def main(args):
     config.learning_rate = args.lr if args.lr else config.learning_rate
     config.epochs = args.epochs if args.epochs else config.epochs
     config.eval_every = args.eval_every if args.eval_every else config.eval_every
-    config.generate_midi_every = args.generate_midi_every if args.generate_midi_every else config.generate_midi_every
     
     # Create REMI tokenizer
     print("Initializing REMI tokenizer...")
@@ -575,7 +513,6 @@ def main(args):
             "d_model": config.d_model,
             "num_decoder_layers": config.num_decoder_layers,
             "eval_every": config.eval_every,
-            "generate_midi_every": config.generate_midi_every,
         }
     )
     
@@ -619,7 +556,8 @@ def main(args):
         dim_feedforward=config.dim_feedforward,
         dropout=config.dropout,
         max_seq_len=config.max_seq_len,
-        pad_token_id=config.pad_token_id
+        pad_token_id=config.pad_token_id,
+        tokenizer=tokenizer,
     ).to(device)
     
     print(f"Model parameters: {count_parameters(model):,}")
@@ -697,6 +635,8 @@ def main(args):
         config=config,
         global_step=global_step
     )
+
+    generate_and_save_midi_examples(model, eval_loader, device, config, global_step)
     
     print(f"Training completed. Final evaluation loss: {final_eval_loss:.4f}")
     

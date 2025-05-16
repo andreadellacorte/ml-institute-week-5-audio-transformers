@@ -66,14 +66,15 @@ def train_model_with_config():
         # Set random seed
         set_seed(config.seed)
                 
-        # Create datasets with num_augmentations (replaces use_augmentation)
-        print("Loading datasets...")
+        # Modify dataset loading to use fold 1 for testing and folds 2-10 for training
+        print("Loading datasets with fold-based split...")
         train_dataset, test_dataset = get_datasets(
             sample_rate=config.sample_rate,
             target_length=config.sample_rate * 4,  # 4 seconds of audio
             num_augmentations=config.num_augmentations,  # Use num_augmentations parameter (0 = no augmentation)
             max_length=None,  # Use all available data
-            split_ratio=config.split_ratio
+            train_folds=list(range(2, 10)),  # Use folds 2-10 for training
+            test_folds=[1]  # Use fold 1 for testing
         )
 
         # Print number of items per class in train and test datasets
@@ -604,7 +605,7 @@ def create_sweep_config():
                 'values': ["raw", "spectrogram", "whisperstyle"]
             },
             'sample_rate': {
-                'values': [8000, 16000, 22050, 32000] # Key variable for this sweep
+                'values': [8000, 16000, 32000] # Key variable for this sweep
             },
 
             # --- Fixed Architectural & Training Params to isolate sample_rate effect ---

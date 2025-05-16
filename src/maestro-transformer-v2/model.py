@@ -249,6 +249,7 @@ class SpectrogramToMIDITransformer(nn.Module):
     """
     def __init__(
         self,
+        tokenizer,
         n_mels: int = 128,
         vocab_size: int = 512,
         d_model: int = 512,
@@ -263,6 +264,7 @@ class SpectrogramToMIDITransformer(nn.Module):
         Initialize the spectrogram-to-MIDI transformer.
         
         Args:
+            tokenizer: Tokenizer for mapping tokens
             n_mels: Number of mel bands in the input spectrogram
             vocab_size: Size of the MIDI token vocabulary
             d_model: Dimension of the model
@@ -275,6 +277,7 @@ class SpectrogramToMIDITransformer(nn.Module):
         """
         super().__init__()
         
+        self.tokenizer = tokenizer
         self.d_model = d_model
         self.vocab_size = vocab_size
         self.pad_token_id = pad_token_id
@@ -501,6 +504,24 @@ class SpectrogramToMIDITransformer(nn.Module):
             if (next_token == end_token_id).all():
                 break
         
+        # Validate token alignment with tokenizer's vocabulary
+        if hasattr(self.tokenizer, 'vocab'):
+            token_mapping = {v: k for k, v in self.tokenizer.vocab.items()}
+            mapped_tokens = []
+            unmapped_tokens = []
+
+            for token in curr_tokens.view(-1):
+                token_str = token_mapping.get(token.item(), None)
+                if token_str:
+                    mapped_tokens.append(token_str)
+                else:
+                    unmapped_tokens.append(token.item())
+                    mapped_tokens.append(f"Unknown_{token.item()}")
+
+            print(f"  - Mapped tokens: {mapped_tokens}")
+            if unmapped_tokens:
+                print(f"  - Unmapped tokens: {unmapped_tokens}")
+        
         # Stack probabilities
         all_probs = torch.cat(all_probs, dim=1) if all_probs else torch.empty(batch_size, 0, device=device)
         
@@ -559,7 +580,9 @@ def example_usage():
     max_seq_len = 50
     
     # Create model
+    tokenizer = None  # Replace with actual tokenizer
     model = SpectrogramToMIDITransformer(
+        tokenizer=tokenizer,
         n_mels=n_mels,
         vocab_size=vocab_size,
         d_model=512,

@@ -12,9 +12,9 @@ import numpy as np
 from huggingface_hub import hf_hub_download
 from tqdm import tqdm  # For progress bar
 import miditoolkit  # For MIDI processing
-from miditok import REMI, TokenizerConfig  # For MIDI tokenization
 
 from src.config import PROCESSED_DATA_DIR
+from tokenizer import create_remi_tokenizer
 
 # --- Configuration ---
 DATASET_ID = "ddPn08/maestro-v3.0.0"
@@ -35,7 +35,7 @@ CHUNK_SIZE_SECONDS = 4  # Number of seconds per chunk
 MIN_CHUNK_DURATION_SECONDS = CHUNK_SIZE_SECONDS / 1
 
 # Processing parameters
-MAX_SONGS_TO_PROCESS = 100  # Maximum number of songs to process
+MAX_SONGS_TO_PROCESS = 10  # Maximum number of songs to process
 TRAIN_SPLIT_PERCENTAGE = 80  # Percentage of songs to use for training (the rest for evaluation)
 
 # Seed for reproducibility
@@ -359,13 +359,8 @@ def tokenize_midi(midi_data):
     Returns:
         List of tokens
     """
-    # Create a TokenizerConfig with the desired settings
-    config = TokenizerConfig(
-        num_velocities=32, use_chords=True, use_programs=False, use_sustain_pedals=True
-    )
-
-    # Initialize the REMI tokenizer with the configuration
-    tokenizer = REMI(config)
+    # Initialize the REMI tokenizer using the centralized function
+    tokenizer = create_remi_tokenizer()
 
     # Tokenize MIDI data
     try:

@@ -14,8 +14,6 @@ import time
 import shutil
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Union
-from pydub import AudioSegment
-from midi2audio import FluidSynth
 
 # Local imports
 from model import SpectrogramToMIDITransformer, MIDIGenerationLoss
@@ -23,9 +21,8 @@ from dataset import create_maestro_dataloaders, MaestroMIDISpectrogramDataset
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import PROCESSED_DATA_DIR, CHECKPOINTS_DATA_DIR
+from tokenizer import create_remi_tokenizer
 import miditoolkit
-from miditok import REMI, TokenizerConfig
-
 
 # Configuration
 class TrainingConfig:
@@ -125,23 +122,6 @@ def load_checkpoint(
     
     return model, optimizer, checkpoint['epoch'], checkpoint['step'], checkpoint['loss']
 
-
-def create_remi_tokenizer():
-    """
-    Create and return a REMI tokenizer instance.
-    The tokenizer is configured to match the one used during data preprocessing.
-
-    Returns:
-        REMI tokenizer instance
-    """
-    # Create a TokenizerConfig with the desired settings
-    config = TokenizerConfig(
-        num_velocities=32, use_chords=True, use_programs=False, use_sustain_pedals=True
-    )
-
-    # Initialize the REMI tokenizer with the configuration
-    tokenizer = REMI(config)
-    return tokenizer
 
 def tokens_to_midi_file(
     tokens: torch.Tensor,
